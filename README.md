@@ -6,73 +6,117 @@
 
 ## 📋 项目概述
 
-### 目标
 给AI喂入多个基础素材（720×1280, ~15秒），自动剪辑成**2-3个**成品视频（2160×3840, 16-22秒），供人工挑选。
 
 ### 成品规格
 | 参数 | 基础素材 | 成品 |
 |------|----------|------|
-| 分辨率 | 720×1280 | 2160×3840 (4K竖屏, 3倍upscale) |
+| 分辨率 | 720×1280 | 2160×3840 (4K竖屏) |
 | 时长 | ~15秒 | 16-22秒主体 + 3.37秒片尾 |
-| 音频 | 有 | 有(BGM混音) + 片尾静音 |
-
-### 成品要求
-- ✅ 合适的背景音乐 (BGM) - AI自主推荐风格
-- ✅ 动态字幕 (Whisper生成后烧录)
-- ✅ 公司商标视频（平销片尾3.37秒，1080×1920，拼接在最后，全部静音）
-
-### 核心痛点
-- 多个素材如何挑选、如何排序
-- 镜头之间的过渡如何处理
-- BGM和字幕如何自动匹配
-- **所有这些决策都依赖 Prompt Engineering**
+| 音频 | 有原声 | BGM替换（无人声）+ 片尾打字音效 |
+| 字幕 | 无 | AI视觉生成英文文案（GPT-4o）/ Whisper回退 |
 
 ---
 
-## 🔄 工作流程（7阶段）
+## 🚀 快速开始
+
+### 1. 环境准备
+
+```bash
+# Python 3.9+
+pip install opencv-python scenedetect whisper openai numpy
+
+# FFmpeg 7.0+（需在系统PATH中）
+ffmpeg -version
+```
+
+### 2. 准备素材
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Stage I: 素材分析                             │
-│  PySceneDetect检测场景 + AI质量评估 → 合格镜头列表               │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Stage II: 剪辑规划                             │
-│  AI生成3个剪辑方案(16-22秒) → 末尾拼接平销片尾                   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Stage III: 视频合成                            │
-│  MoviePy拼接 + FFmpeg upscale 720→2160 + 转场                   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Stage IV: 字幕生成                             │
-│  Whisper音频→文字 → 动态字幕样式 → FFmpeg烧录                   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Stage V: BGM匹配与混音                         │
-│  AI分析情绪 → 推荐BGM风格 → FFmpeg混音(人声为主BGM为辅)          │
-│  商标片尾单独静音处理                                             │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Stage VI: 商标叠加                             │
-│  平销片尾(1080×1920, 3.37s)拼接在最后，保持静音                  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────────┐
-                    │  Stage VII: 成品输出 │
-                    │  2-3个候选视频       │
-                    └─────────────────────┘
+素材目录/
+├── 素材1.mp4    # 720×1280 竖屏视频
+├── 素材2.mp4
+└── ...
+```
+
+### 3. 准备片尾视频
+
+将 `平销片尾.mp4`（1080×1920, 3.37秒, 含打字音效）放在脚本同目录下。
+
+### 4. 运行
+
+```bash
+# 预设品类（自动推导输入输出目录）
+python run_workflow.py --category 别针 --allow-heuristic-fallback
+
+# 或自定义目录
+python run_workflow.py --input "D:\素材目录" --output "D:\输出目录" --allow-heuristic-fallback
+```
+
+### 5. 启用 AI 视觉字幕（可选）
+
+```bash
+# 设置 OpenAI API Key 后，自动使用 GPT-4o 看画面生成英文字幕
+# 不设置则自动回退到 Whisper 语音识别
+set OPENAI_API_KEY=sk-你的Key       # Windows
+export OPENAI_API_KEY=sk-你的Key     # Linux/Mac
+
+python run_workflow.py --category 别针 --allow-heuristic-fallback
+```
+
+---
+
+## ⚙️ 参数说明
+
+| 参数 | 必选 | 说明 |
+|------|------|------|
+| `--category` | 三选一 | 摆件/别针/航海贴/衣服/露营贴 |
+| `--input` | 三选一 | 自定义输入目录 |
+| `--output` | 配对input | 自定义输出目录 |
+| `--allow-heuristic-fallback` | ✅ | 启用启发式规划 |
+| `--candidates` | 否 | 候选数（2或3，默认3） |
+| `--whisper-model` | 否 | Whisper模型（默认base） |
+| `--language` | 否 | 字幕语言（默认自动识别） |
+| `--overwrite` | 否 | 覆盖已有输出 |
+| `--keep-temp` | 否 | 保留中间文件 |
+| `--dry-run` | 否 | 只分析不渲染 |
+
+---
+
+## 🔄 工作流程
+
+```
+Stage 1: 扫描素材目录 → 收集视频文件
+    ↓
+Stage 2: PySceneDetect 场景检测 → 识别镜头边界
+    ↓
+Stage 3: 启发式剪辑规划 → 生成2-3个候选方案（每个16-22秒）
+    ↓
+Stage 4: FFmpeg视频合成 → 裁剪片段 + 拼接 + 4K放大
+    ↓
+Stage 5: 字幕生成
+    ├─ 有API Key → GPT-4o看帧生成英文广告文案
+    └─ 无API Key → Whisper语音识别生成字幕
+    ↓
+Stage 5.5: BGM替换 → 用BGM替换视频音轨（去除原声人声）
+    ↓
+Stage 6: 片尾拼接 → 拼接商标片尾（保留打字音效）
+    ↓
+输出: 2-3个候选成品视频
+```
+
+---
+
+## 📁 输出文件
+
+```
+输出目录/
+├── candidate_01.mp4              # 成品1（最终版）
+├── candidate_02.mp4              # 成品2
+├── candidate_01_clean.mp4        # 中间：干净视频（无字幕无BGM）
+├── candidate_01_subtitle.mp4     # 中间：带字幕（无BGM无片尾）
+├── candidate_01_bgm.mp4          # 中间：带字幕+BGM（无片尾）
+└── manifest.json                 # 方案信息
 ```
 
 ---
@@ -81,103 +125,27 @@
 
 | 模块 | 技术 | 说明 |
 |------|------|------|
-| 场景检测 | PySceneDetect | OpenCV-based 镜头检测 |
-| 视频处理 | FFmpeg + MoviePy | 视频拼接、upscale、字幕烧录、混音 |
-| 字幕生成 | Whisper (OpenAI) | 音频→文字→动态字幕 |
-| AI决策 | GPT-4o / Claude | Prompt Engineering 核心 |
-| BGM | AI推荐 + 免费音乐库 | 无现成音乐库，AI自主推荐风格 |
+| 场景检测 | PySceneDetect | 镜头边界识别 |
+| 视频处理 | FFmpeg | 裁剪、拼接、放大、字幕烧录、音轨替换 |
+| 字幕-AI | GPT-4o Vision | 看画面生成英文广告文案 |
+| 字幕-回退 | Whisper | 语音识别生成字幕 |
+| 质量评估 | OpenCV | 清晰度/亮度/对比度打分 |
 
 ---
 
-## 📁 项目结构
+## 📝 注意事项
 
-```
-AI-automated-cutting/
-├── README.md                      # 本文件
-├── handoff.md                     # 交接文档
-├── 竞品调研报告.md                  # 开源项目调研
-├── prompt_templates.md            # Prompt 模板库
-├── agents.md                      # 子窗口协作规则
-├── 平销片尾.mp4                    # 商标视频 (1080×1920, 3.37s, 静音)
-│
-├── config/
-│   └── settings.py                # 配置文件
-│
-├── core/
-│   ├── video_analyzer.py          # 场景检测+质量评估
-│   ├── clip_planner.py            # AI剪辑规划
-│   ├── video_composer.py          # 视频合成(upscale)
-│   ├── subtitle_generator.py      # 字幕生成
-│   ├── bgm_matcher.py             # BGM匹配
-│   └── final_renderer.py          # 商标叠加
-│
-├── workflows/
-│   └── main_workflow.py           # 主工作流
-│
-└── output/
-    └── {品类}/                    # 按品类输出成品
-```
+1. **片尾视频**：`平销片尾.mp4` 需单独准备（不在Git仓库中），放在脚本同目录
+2. **BGM音乐库**：默认读取 `C:/Users/Lenovo/Desktop/music experiment/` 目录，可修改 `BGM_LIBRARY_PATH`
+3. **API Key 安全**：`OPENAI_API_KEY` 通过环境变量传入，不写入代码，推送到GitHub不会泄露
+4. **中文字幕路径**：FFmpeg concat 不支持中文路径，脚本内部已用temp短路径处理
 
 ---
 
-## 🔑 Prompt Engineering 核心
+## 📚 相关文档
 
-本项目的灵魂是 **Prompt Engineering**，所有AI决策都依赖精心设计的Prompt。
-
-### 关键原则
-1. **角色设定** - 给AI定义一个专业角色（"资深剪辑师"）
-2. **输入清晰** - 提供足够的上下文和约束
-3. **输出格式** - 指定明确的输出格式（JSON/Markdown）
-4. **评估标准** - 给出判断好坏的具体标准
-
-### 关键约束（从样例提取）
-- 输出分辨率: 2160×3840 (4K竖屏)
-- 基础素材分辨率: 720×1280 (需3倍upscale)
-- 成品时长: 16-22秒主体 + 3.37秒片尾
-- 字幕: 动态字幕（白字黑描边、下半部分、逐字出现）
-- BGM: 无现成音乐库，AI根据内容自主推荐风格
-- 片尾: 1080×1920, 3.37秒, 静音拼接
-
----
-
-## 🚀 快速开始
-
-### 环境要求
-- Python 3.9+
-- FFmpeg
-- ImageMagick
-- OpenAI API Key (用于 GPT)
-
-### 安装依赖
-```bash
-pip install scenedetect moviepy openai-whisper
-```
-
-### 运行
-```bash
-python workflows/main_workflow.py --input ./assets/raw_videos --output ./output
-```
-
----
-
-## 👥 窗口分配
-
-| 窗口 | 名称 | 负责阶段 |
-|------|------|----------|
-| 窗口1 | 主控窗口 | Stage I, II, 统筹协调 |
-| 窗口2 | 执行窗口 | Stage III, IV, VI |
-| 窗口3 | PE窗口 | Stage II(部分), V, 成品检验 |
-
-详见: [handoff.md](./handoff.md)
-
----
-
-## 📚 相关资源
-
-- [PySceneDetect](https://github.com/Breakthrough/PySceneDetect) - 5.1k stars, 场景检测
-- [MoviePy](https://github.com/jeromegrosse/moviepy) - 视频编辑
-- [Whisper](https://github.com/openai/whisper) - 字幕生成
-- [open-chat-video-editor](https://github.com/SCUTlihaoyu/open-chat-video-editor) - 2.8k stars, 参考架构
+- [交接文档](./handoff.md) - 完整开发历史和问题记录
+- [Prompt模板](./prompt_templates.md) - AI决策的Prompt设计
 
 ---
 
