@@ -292,6 +292,117 @@ def detect_frame_glitch(video_path: str, start: float, end: float) -> bool:
                 pass
 
 
+def extract_clip_keypoints(clip: Clip) -> Optional[tuple[np.ndarray, list]]:
+    """
+    提取 clip 中间帧的显著性区域 ORB 关键点。
+    返回 (gray_image, keypoints_descriptors) 或 None。
+    """
+    mid = (clip.start_time + clip.end_time) / 2
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+        tmp = tf.name
+    try:
+        if not extract_frame(clip.source_file, mid, tmp):
+            return None
+        img = cv2.imread(tmp)
+        if img is None:
+            return None
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # 显著性检测：cv2 内置的 StaticSaliencyFineGrained
+        try:
+            saliency = cv2.saliency.StaticSaliencyFineGrained_create()
+            ok, sal_map = saliency.computeSaliency(img)
+        except Exception:
+            sal_map = None
+
+        if sal_map is not None and ok:
+            # 取显著图前 30% 区域作为主体掩码
+            sal_u8 = (sal_map * 255).astype("uint8") if sal_map.max() <= 1.0 else sal_map.astype("uint8")
+            _, mask = cv2.threshold(sal_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            # 收缩到中心 60% 范围，避免把背景全包进来
+            h, w = mask.shape
+            cx0, cx1 = int(w * 0.2), int(w * 0.8)
+            cy0, cy1 = int(h * 0.2), int(h * 0.8)
+            center_mask = np.zeros_like(mask)
+            center_mask[cy0:cy1, cx0:cx1] = 255
+            mask = cv2.bitwise_and(mask, center_mask)
+        else:
+            mask = None
+
+        orb = cv2.ORB_create(nfeatures=500)
+        if mask is not None and mask.sum() > 1000:
+            kps, des = orb.detectAndCompute(gray, mask)
+        else:
+            kps, des = orb.detectAndCompute(gray, None)
+
+        if des is None or len(kps) < 8:
+            return None
+        return gray, kps, des
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def compute_clip_match_rate(des1, des2) -> float:
+    """计算两个 clip 的 ORB 描述符匹配率。"""
+    if des1 is None or des2 is None:
+        return 0.0
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+    if not matches:
+        return 0.0
+    # 用距离排序，取前 50 个匹配中距离 < 50 的比例
+    matches = sorted(matches, key=lambda m: m.distance)
+    top = matches[: min(50, len(matches))]
+    good = sum(1 for m in top if m.distance < 50)
+    return good / max(1, len(top))
+
+
+def filter_inconsistent_adjacent_clips(
+    plan_clips: list,
+    match_threshold: float = 0.2,
+) -> list:
+    """
+    对候选方案内的相邻 clip 做主体一致性检查。
+    只对**同一源素材**的相邻 clip 做检测（跨素材产品形态本就允许不同）。
+    匹配率 < match_threshold 则丢掉后面那个 clip。
+    """
+    if len(plan_clips) < 2:
+        return list(plan_clips)
+
+    # 预计算所有 clip 的关键点
+    kp_cache: dict[int, Optional[tuple]] = {}
+    for idx, clip in enumerate(plan_clips):
+        kp_cache[idx] = extract_clip_keypoints(clip)
+
+    kept: list = []
+    last_kp = None
+    last_source: Optional[str] = None
+    dropped_count = 0
+    for idx, clip in enumerate(plan_clips):
+        cur = kp_cache.get(idx)
+        same_source = (last_source is not None and clip.source_file == last_source)
+        if same_source and last_kp is not None and cur is not None:
+            rate = compute_clip_match_rate(last_kp[2], cur[2])
+            if rate < match_threshold:
+                logger.info(
+                    "  跨镜头一致性: 片段%d→%d 匹配率 %.2f < %.2f，丢弃片段%d",
+                    idx, idx + 1, rate, match_threshold, idx + 1,
+                )
+                dropped_count += 1
+                continue
+        kept.append(clip)
+        if cur is not None:
+            last_kp = cur
+        last_source = clip.source_file
+
+    if dropped_count > 0:
+        logger.info("  跨镜头一致性: 丢弃 %d 个不一致片段，保留 %d 个", dropped_count, len(kept))
+    return kept
+
+
 def calculate_scene_quality(video_path: str, start: float, end: float) -> tuple[float, bool]:
     """计算场景静态画质；动态异常在切成约2秒片段后另行检测。"""
     temp_frame = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
@@ -560,6 +671,17 @@ def stage3_heuristic_planning(
         if not (TARGET_DURATION_MIN <= total_duration <= TARGET_DURATION_MAX):
             logger.error(
                 "  方案%d只有 %.2fs，未达到16秒硬性下限，拒绝生成",
+                cand_id + 1,
+                total_duration,
+            )
+            continue
+
+        # 跨镜头主体一致性过滤
+        plan_clips = filter_inconsistent_adjacent_clips(plan_clips)
+        total_duration = sum(c.duration for c in plan_clips)
+        if not (TARGET_DURATION_MIN <= total_duration <= TARGET_DURATION_MAX):
+            logger.error(
+                "  方案%d一致性过滤后只有 %.2fs，拒绝生成",
                 cand_id + 1,
                 total_duration,
             )
