@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Logs and temporary media
+*.log
+temp*/
+tmp/
+output*/
+candidate_*.mp4
+sub_*.jpg
+
+# Local integration-test assets
+平销片尾.mp4
+test_minimax.py
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

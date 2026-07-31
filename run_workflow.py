@@ -6,11 +6,13 @@ AI视频自动剪辑工作流 - 通用脚本
 """
 
 import argparse
+import itertools
 import json
 import logging
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -44,6 +46,30 @@ except ImportError:
     openai_available = False
 
 
+def get_minimax_credentials() -> tuple[Optional[str], Optional[str]]:
+    """从 Windows 注册表读取 MiniMax 用户变量。"""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ)
+        api_key, _ = winreg.QueryValueEx(key, "MINIMAX_API_KEY")
+        base_url, _ = winreg.QueryValueEx(key, "MINIMAX_BASE_URL")
+        winreg.CloseKey(key)
+        return (api_key if api_key else None, base_url if base_url else None)
+    except Exception:
+        return (None, None)
+
+
+def get_ai_client():
+    """返回可用的 AI client（MiniMax 优先，OpenAI 次之）。"""
+    minimax_key, minimax_url = get_minimax_credentials()
+    if minimax_key and minimax_url:
+        return OpenAI(api_key=minimax_key, base_url=minimax_url), "MiniMax-M3"
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key and openai_available:
+        return OpenAI(api_key=openai_key), "gpt-4o"
+    return None, None
+
+
 # ============== 配置 ==============
 DEFAULT_CATEGORIES = {
     "摆件": "D:/doyobest/自动剪辑研究/摆件",
@@ -55,17 +81,83 @@ DEFAULT_CATEGORIES = {
 
 LOGO_FILE = "D:/doyobest/视频自动剪辑workflow/平销片尾.mp4"
 BGM_LIBRARY_PATH = "C:/Users/Lenovo/Desktop/music experiment"  # TODO: 后续改为相对路径
-QUALITY_EXCLUSIONS_FILE = Path(__file__).with_name("quality_exclusions.json")
 OUTPUT_WIDTH = 2160
 OUTPUT_HEIGHT = 3840
-TARGET_DURATION_MIN = 16
-TARGET_DURATION_MAX = 22
+TARGET_DURATION = 15.0
+DURATION_SOFT_MIN = 12.0
+DURATION_SOFT_MAX = 18.0
 LOGO_DURATION = 3.37
 CLIP_DURATION_TARGET = 2.0
 MIN_STABLE_SCENE_DURATION = 1.35
 MIN_CLIP_DURATION = 1.35
 SCENE_EDGE_PADDING = 0.15
 MIN_QUALITY_SCORE = 4.0
+
+# 字幕视觉规范：参考人工成片，固定粗体无衬线字体，只在有限色板和安全位置间切换。
+SUBTITLE_FONT_NAME = "Lato"
+SUBTITLE_FONT_SIZE = 200
+SUBTITLE_OUTLINE = 8
+SUBTITLE_MAX_WORDS = 10
+SUBTITLE_ROLES = ("emotion_hook", "quality", "memory", "customization")
+SUBTITLE_POSITION_Y = {
+    "top_high": 600,
+    "top": 960,
+    "upper_middle": 1440,
+    "lower_middle": 2860,
+}
+# 统一用顶部安全区，避免被产品主体遮挡
+SUBTITLE_ROLE_POSITION = {
+    "emotion_hook": "top",
+    "quality": "top",
+    "memory": "top",
+    "customization": "top",
+}
+SUBTITLE_ROLE_COLOR = {
+    "emotion_hook": "&H00FFFFFF",      # 纯白
+    "quality": "&H00FFD9A8",           # 浅金蓝
+    "memory": "&H00E8D5FF",            # 淡紫
+    "customization": "&H00FFD9A8",     # 浅金蓝
+}
+
+# 无 API 时使用完整、可审计的广告句，不再把被剪碎的 Whisper 转写直接当文案。
+SUBTITLE_COPY_BY_CATEGORY = {
+    "别针": {
+        "emotion_hook": "Keep their love close to your heart",
+        "quality": "Durable alloy frame",
+        "memory": "Keep their memory alive wherever life takes you",
+        "customization": "Upload a photo & custom text",
+    },
+    "摆件": {
+        "emotion_hook": "Keep your favorite moments close",
+        "quality": "Crafted for lasting beauty",
+        "memory": "Turn precious memories into something timeless",
+        "customization": "Personalize every meaningful detail",
+    },
+    "航海贴": {
+        "emotion_hook": "Carry the spirit of adventure with you",
+        "quality": "Made to last through every journey",
+        "memory": "Keep every voyage close to your heart",
+        "customization": "Make it uniquely yours",
+    },
+    "衣服": {
+        "emotion_hook": "Wear what feels true to you",
+        "quality": "Soft comfort made to last",
+        "memory": "Made for moments worth remembering",
+        "customization": "Choose your perfect everyday look",
+    },
+    "露营贴": {
+        "emotion_hook": "Bring adventure wherever you go",
+        "quality": "Built for the journey ahead",
+        "memory": "Keep every outdoor memory close",
+        "customization": "Make your gear uniquely yours",
+    },
+    "default": {
+        "emotion_hook": "Made for moments that matter",
+        "quality": "Thoughtfully crafted to last",
+        "memory": "Keep every meaningful memory close",
+        "customization": "Make it uniquely yours",
+    },
+}
 
 # 品类偏好BGM类型（逗号分隔，越靠前优先级越高）
 BGM_PREFERENCE_BY_CATEGORY = {
@@ -113,6 +205,16 @@ class CandidatePlan:
     clips: list
     total_duration: float
     emotion_curve: str = ""
+
+
+@dataclass
+class SubtitleSegment:
+    start: float
+    end: float
+    text: str
+    role: str
+    position: str
+    color: str
 
 
 # ============== 日志配置 ==============
@@ -532,32 +634,9 @@ def stage2_detect_scenes(video_info: VideoInfo, threshold: float = 30.0) -> list
 
 
 # ============== Stage 3: 剪辑规划（启发式） ==============
-def load_quality_exclusions(category: Optional[str]) -> list[dict]:
-    """加载人工质检确认的语义坏片段，作为自动画质检测的可审计兜底。"""
-    if not category or not QUALITY_EXCLUSIONS_FILE.exists():
-        return []
-    try:
-        data = json.loads(QUALITY_EXCLUSIONS_FILE.read_text(encoding="utf-8"))
-        rules = data.get(category, [])
-        valid_rules = [
-            rule
-            for rule in rules
-            if isinstance(rule, dict)
-            and rule.get("file")
-            and float(rule.get("end", 0.0)) > float(rule.get("start", 0.0))
-        ]
-        if valid_rules:
-            logger.info("  已加载 %d 条人工质检排除区间", len(valid_rules))
-        return valid_rules
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
-        logger.warning("质检排除配置读取失败: %s", error)
-        return []
-
-
 def stage3_heuristic_planning(
     materials: list[tuple[VideoInfo, list[Scene]]],
     num_candidates: int = 3,
-    excluded_ranges: Optional[list[dict]] = None,
 ) -> list[CandidatePlan]:
     """
     启发式剪辑规划（无AI时使用）
@@ -567,8 +646,6 @@ def stage3_heuristic_planning(
 
     all_clips: list[Clip] = []
     rejected_glitches = 0
-    rejected_manual = 0
-    excluded_ranges = excluded_ranges or []
 
     # 先避开场景边缘，再把长场景均匀切成约2秒片段并逐段预检。
     for video_info, scenes in materials:
@@ -592,15 +669,6 @@ def stage3_heuristic_planning(
             for clip_index in range(num_cuts):
                 clip_start = usable_start + clip_index * clip_duration
                 clip_end = usable_start + (clip_index + 1) * clip_duration
-                overlaps_exclusion = any(
-                    Path(rule.get("file", "")).name == Path(video_info.path).name
-                    and clip_start < float(rule.get("end", 0.0))
-                    and clip_end > float(rule.get("start", 0.0))
-                    for rule in excluded_ranges
-                )
-                if overlaps_exclusion:
-                    rejected_manual += 1
-                    continue
                 if detect_frame_glitch(video_info.path, clip_start, clip_end):
                     rejected_glitches += 1
                     continue
@@ -613,10 +681,9 @@ def stage3_heuristic_planning(
                 ))
 
     logger.info(
-        "  收集到 %d 个候选片段，过滤 %d 个异常过渡片段、%d 个质检黑名单片段",
+        "  收集到 %d 个候选片段，过滤 %d 个异常过渡片段",
         len(all_clips),
         rejected_glitches,
-        rejected_manual,
     )
     if not all_clips:
         return []
@@ -626,7 +693,10 @@ def stage3_heuristic_planning(
     for cand_id in range(num_candidates):
         plan_clips: list[Clip] = []
         total_duration = 0.0
-        target_duration = min(20.0, 18.0 + cand_id * 0.75)
+        # 约15秒是剪辑目标，不是硬性验收门槛；候选间保留轻微时长差异。
+        target_duration = TARGET_DURATION + (
+            cand_id - (num_candidates - 1) / 2
+        ) * 0.5
         rng = random.Random(20260728 + cand_id)
         shuffled_clips = all_clips.copy()
         rng.shuffle(shuffled_clips)
@@ -641,9 +711,6 @@ def stage3_heuristic_planning(
         for clip in shuffled_clips:
             if total_duration >= target_duration:
                 break
-            if total_duration + clip.duration > TARGET_DURATION_MAX + 0.01:
-                continue
-
             if source_count > 1 and clip.source_file == last_source:
                 if consecutive_count >= 2:
                     continue
@@ -655,37 +722,35 @@ def stage3_heuristic_planning(
             plan_clips.append(clip)
             total_duration += clip.duration
 
-        # 多样性约束导致未满16秒时，第二遍只放宽连续同源限制，不放宽质量和时长。
-        if total_duration < TARGET_DURATION_MIN:
+        # 明显偏短时再补片段；约15秒仅为软目标，不因时长拒绝候选。
+        if total_duration < DURATION_SOFT_MIN:
             selected_ids = {id(clip) for clip in plan_clips}
             for clip in shuffled_clips:
-                if total_duration >= TARGET_DURATION_MIN:
+                if total_duration >= TARGET_DURATION:
                     break
                 if id(clip) in selected_ids:
-                    continue
-                if total_duration + clip.duration > TARGET_DURATION_MAX + 0.01:
                     continue
                 plan_clips.append(clip)
                 total_duration += clip.duration
 
-        if not (TARGET_DURATION_MIN <= total_duration <= TARGET_DURATION_MAX):
-            logger.error(
-                "  方案%d只有 %.2fs，未达到16秒硬性下限，拒绝生成",
-                cand_id + 1,
-                total_duration,
-            )
+        if not plan_clips:
             continue
+        if not (DURATION_SOFT_MIN <= total_duration <= DURATION_SOFT_MAX):
+            logger.warning(
+                "  方案%d主体 %.2fs，偏离约15秒软目标，但继续生成",
+                cand_id + 1, total_duration,
+            )
 
         # 跨镜头主体一致性过滤
         plan_clips = filter_inconsistent_adjacent_clips(plan_clips)
         total_duration = sum(c.duration for c in plan_clips)
-        if not (TARGET_DURATION_MIN <= total_duration <= TARGET_DURATION_MAX):
-            logger.error(
-                "  方案%d一致性过滤后只有 %.2fs，拒绝生成",
-                cand_id + 1,
-                total_duration,
-            )
+        if not plan_clips:
             continue
+        if not (DURATION_SOFT_MIN <= total_duration <= DURATION_SOFT_MAX):
+            logger.warning(
+                "  方案%d一致性过滤后 %.2fs，偏离软目标但继续生成",
+                cand_id + 1, total_duration,
+            )
 
         candidates.append(CandidatePlan(
             id=cand_id + 1,
@@ -796,10 +861,339 @@ def stage4_video_compose(
 
 # ============== Stage 5: 字幕生成 ==============
 
+def get_subtitle_copy(category: Optional[str], role: str) -> str:
+    """返回无 API 也能稳定使用的完整广告短句。"""
+    category_copy = SUBTITLE_COPY_BY_CATEGORY.get(
+        category or "", SUBTITLE_COPY_BY_CATEGORY["default"]
+    )
+    return category_copy.get(role, SUBTITLE_COPY_BY_CATEGORY["default"][role])
+
+
+def normalize_ad_caption(text: str, fallback: str) -> str:
+    """清理 AI 文案；任何省略、过长或明显残句都回退到完整模板。"""
+    candidate = re.sub(r"\s+", " ", (text or "").strip().strip('"\''))
+    candidate = re.sub(r"^(?:caption|subtitle)\s*:\s*", "", candidate, flags=re.I)
+    if not candidate or "..." in candidate or "…" in candidate:
+        return fallback
+
+    candidate = candidate.rstrip(" .!?")
+    words = re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?|&", candidate)
+    if not (2 <= len(words) <= SUBTITLE_MAX_WORDS):
+        return fallback
+
+    incomplete_endings = {
+        "a", "an", "the", "and", "or", "but", "to", "for", "with", "into", "from"
+    }
+    if words[-1].lower() in incomplete_endings:
+        return fallback
+    return candidate
+
+
+def wrap_ad_caption(text: str, max_line_chars: int = 24) -> str:
+    """把较长英文广告句平衡成最多两行，不在单词中间断开。"""
+    words = text.split()
+    if len(text) <= max_line_chars or len(words) < 4:
+        return text
+
+    best_index = min(
+        range(1, len(words)),
+        key=lambda index: abs(
+            len(" ".join(words[:index])) - len(" ".join(words[index:]))
+        ),
+    )
+    return " ".join(words[:best_index]) + r"\N" + " ".join(words[best_index:])
+
+
+def build_subtitle_segments(
+    plan: CandidatePlan,
+    total_duration: float,
+    category: Optional[str],
+) -> list[SubtitleSegment]:
+    """每个 clip 对应一个字幕段，角色循环复用 SUBTITLE_ROLES。"""
+    if total_duration <= 0 or not plan.clips:
+        return []
+
+    segments: list[SubtitleSegment] = []
+    cursor = 0.0
+    for index, clip in enumerate(plan.clips):
+        clip_start = round(cursor, 2)
+        clip_end = round(cursor + float(clip.duration), 2)
+        role = SUBTITLE_ROLES[index % len(SUBTITLE_ROLES)]
+        segments.append(SubtitleSegment(
+            start=clip_start,
+            end=clip_end,
+            text=get_subtitle_copy(category, role),
+            role=role,
+            position=SUBTITLE_ROLE_POSITION[role],
+            color=SUBTITLE_ROLE_COLOR[role],
+        ))
+        cursor += float(clip.duration)
+    return segments
+
+
+def transcribe_subtitle_evidence(
+    video_path: str,
+    temp_dir: Path,
+    whisper_model: str,
+    language: Optional[str],
+) -> list[dict]:
+    """Whisper 只提供镜头语义关键词，不再把残缺转写直接显示在画面上。"""
+    if not whisper_available:
+        logger.info("  Whisper 未安装，使用叙事模板顺序")
+        return []
+    video_info = get_video_info(video_path)
+    if not video_info or not video_info.has_audio:
+        logger.info("  视频无可用音轨，使用叙事模板顺序")
+        return []
+
+    audio_path = temp_dir / "subtitle_evidence.wav"
+    extract_cmd = [
+        "ffmpeg", "-y", "-i", video_path, "-vn",
+        "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(audio_path),
+    ]
+    if not run_ffmpeg(extract_cmd, "  提取字幕语义音频"):
+        return []
+    try:
+        model = whisper.load_model(whisper_model, device="cpu")
+        options = {"task": "transcribe"}
+        if language:
+            options["language"] = language
+        result = model.transcribe(str(audio_path), **options)
+        evidence = [
+            {
+                "start": float(item.get("start", 0.0)),
+                "end": float(item.get("end", 0.0)),
+                "text": str(item.get("text", "")).strip(),
+            }
+            for item in result.get("segments", [])
+            if str(item.get("text", "")).strip()
+        ]
+        logger.info("  Whisper 获取 %d 段语义证据（不会直接上屏）", len(evidence))
+        return evidence
+    except Exception as error:
+        logger.warning("  Whisper 语义证据获取失败，使用模板顺序: %s", error)
+        return []
+
+
+def apply_transcript_role_evidence(
+    segments: list[SubtitleSegment],
+    evidence: list[dict],
+    category: Optional[str],
+) -> list[SubtitleSegment]:
+    """用高置信关键词定位材质/定制镜头，其余角色按完整广告结构补齐。"""
+    if len(segments) < 2 or not evidence:
+        return segments
+
+    evidence_by_segment: list[str] = []
+    for segment in segments:
+        text = " ".join(
+            item["text"] for item in evidence
+            if float(item["end"]) > segment.start and float(item["start"]) < segment.end
+        ).lower()
+        evidence_by_segment.append(text)
+
+    strong_keywords = {
+        "quality": {
+            "alloy", "durable", "metal", "frame", "sturdy", "strong", "quality", "crafted"
+        },
+        "customization": {
+            "upload", "photo", "custom", "text", "personalize", "personalized", "add", "design"
+        },
+    }
+    assignments: dict[int, str] = {0: "emotion_hook"}
+    used_roles = {"emotion_hook"}
+    candidates: list[tuple[int, int, str]] = []
+    for index, text in enumerate(evidence_by_segment[1:], start=1):
+        words = set(re.findall(r"[a-z]+", text))
+        for role, keywords in strong_keywords.items():
+            score = len(words & keywords)
+            if score:
+                candidates.append((score, index, role))
+
+    for score, index, role in sorted(candidates, reverse=True):
+        if index in assignments or role in used_roles:
+            continue
+        assignments[index] = role
+        used_roles.add(role)
+        logger.info(
+            "  Whisper 语义定位 %.2f-%.2fs: %s (关键词%d)",
+            segments[index].start, segments[index].end, role, score,
+        )
+
+    remaining_roles = [role for role in SUBTITLE_ROLES if role not in used_roles]
+    role_cycle = itertools.cycle(SUBTITLE_ROLES)
+    next_role = next(role_cycle)
+    for index in range(len(segments)):
+        if index not in assignments:
+            if remaining_roles:
+                assignments[index] = remaining_roles.pop(0)
+            else:
+                while next_role in used_roles:
+                    next_role = next(role_cycle)
+                assignments[index] = next_role
+                next_role = next(role_cycle)
+
+    for index, segment in enumerate(segments):
+        role = assignments[index]
+        segment.role = role
+        segment.text = get_subtitle_copy(category, role)
+        segment.position = SUBTITLE_ROLE_POSITION[role]
+        segment.color = SUBTITLE_ROLE_COLOR[role]
+    return segments
+
+
+def choose_caption_position(
+    video_path: str,
+    segment: SubtitleSegment,
+) -> str:
+    """在上、中、下安全区中选择较空的位置，同时保留参考成片的角色偏好。"""
+    preferred = SUBTITLE_ROLE_POSITION[segment.role]
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as frame_file:
+        frame_path = frame_file.name
+    try:
+        sample_time = segment.start + (segment.end - segment.start) * 0.5
+        if not extract_frame(video_path, sample_time, frame_path):
+            return preferred
+        image = cv2.imread(frame_path)
+        if image is None:
+            return preferred
+        image = cv2.resize(image, (540, 960))
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 80, 160)
+
+        saliency_map = None
+        try:
+            saliency = cv2.saliency.StaticSaliencyFineGrained_create()
+            ok, saliency_map = saliency.computeSaliency(image)
+            if not ok:
+                saliency_map = None
+        except Exception:
+            saliency_map = None
+
+        faces: list[tuple[int, int, int, int]] = []
+        try:
+            cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            faces = list(cascade.detectMultiScale(gray, 1.1, 5, minSize=(40, 40)))
+        except Exception:
+            faces = []
+
+        height, width = gray.shape
+        scores: dict[str, float] = {}
+        for position, output_y in SUBTITLE_POSITION_Y.items():
+            center_y = int(output_y / OUTPUT_HEIGHT * height)
+            half_band = int(height * 0.075)
+            y0, y1 = max(0, center_y - half_band), min(height, center_y + half_band)
+            x0, x1 = int(width * 0.10), int(width * 0.90)
+            edge_score = float(np.mean(edges[y0:y1, x0:x1] > 0))
+            texture_score = float(np.std(gray[y0:y1, x0:x1]) / 255.0)
+            saliency_score = (
+                float(np.mean(saliency_map[y0:y1, x0:x1]))
+                if saliency_map is not None else 0.0
+            )
+            face_penalty = 0.0
+            for face_x, face_y, face_w, face_h in faces:
+                if face_x < x1 and face_x + face_w > x0 and face_y < y1 and face_y + face_h > y0:
+                    face_penalty += 1.0
+            preference_penalty = 0.0 if position == preferred else 0.12
+            scores[position] = (
+                edge_score * 1.5 + texture_score * 0.35 + saliency_score * 0.9
+                + face_penalty + preference_penalty
+            )
+        return min(scores, key=scores.get)
+    finally:
+        try:
+            os.unlink(frame_path)
+        except OSError:
+            pass
+
+
+def optimize_subtitle_positions(
+    video_path: str,
+    segments: list[SubtitleSegment],
+) -> list[SubtitleSegment]:
+    for segment in segments:
+        segment.position = choose_caption_position(video_path, segment)
+        logger.info(
+            "  字幕布局 %.2f-%.2fs: %s / %s",
+            segment.start, segment.end, segment.role, segment.position,
+        )
+    return segments
+
+
+def write_subtitle_ass(segments: list[SubtitleSegment], ass_path: Path) -> None:
+    """用统一字体、有限色板和逐镜头位置生成 ASS。"""
+    with open(ass_path, "w", encoding="utf-8") as file:
+        file.write("[Script Info]\n")
+        file.write("Title: ad subtitle\n")
+        file.write(f"PlayResX: {OUTPUT_WIDTH}\n")
+        file.write(f"PlayResY: {OUTPUT_HEIGHT}\n")
+        file.write("ScriptType: v4.00+\n")
+        file.write("WrapStyle: 2\n\n")
+        file.write("[V4+ Styles]\n")
+        file.write(
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+            "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, "
+            "MarginR, MarginV, Encoding\n"
+        )
+        file.write(
+            f"Style: AdCaption,{SUBTITLE_FONT_NAME},{SUBTITLE_FONT_SIZE},&H00FFFFFF,"
+            f"&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,"
+            f"{SUBTITLE_OUTLINE},0,5,140,140,0,1\n\n"
+        )
+        file.write("[Events]\n")
+        file.write("Format: Layer, Start, End, Style, Text\n")
+        for segment in segments:
+            y = SUBTITLE_POSITION_Y[segment.position]
+            text = wrap_ad_caption(escape_ass_text(segment.text))
+            override = (
+                r"{\an5\pos(" + f"{OUTPUT_WIDTH // 2},{y}" + r")"
+                + rf"\c{segment.color}\3c&H00000000&\bord{SUBTITLE_OUTLINE}\shad0}}"
+            )
+            file.write(
+                f"Dialogue: 0,{format_ass_time(segment.start)},"
+                f"{format_ass_time(segment.end)},AdCaption,{override}{text}\n"
+            )
+
+
+def burn_subtitle_segments(
+    video_path: str,
+    output_path: str,
+    segments: list[SubtitleSegment],
+    temp_dir: Path,
+    description: str,
+) -> bool:
+    ass_path = temp_dir / "subtitle.ass"
+    write_subtitle_ass(segments, ass_path)
+
+    vendored_font = Path(__file__).with_name("fonts") / "Lato-Bold.ttf"
+    subtitle_filter = "ass=subtitle.ass"
+    if vendored_font.exists():
+        shutil.copy2(vendored_font, temp_dir / vendored_font.name)
+        subtitle_filter += ":fontsdir=."
+
+    cmd = [
+        "ffmpeg", "-y", "-i", os.path.abspath(video_path),
+        "-vf", subtitle_filter,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "copy", "-movflags", "+faststart",
+        os.path.abspath(output_path),
+    ]
+    if not run_ffmpeg(cmd, description, cwd=str(temp_dir)):
+        return False
+    verify_segments = [
+        {"start": segment.start, "end": segment.end, "position": segment.position}
+        for segment in segments
+    ]
+    return verify_burned_subtitles(video_path, output_path, verify_segments)
+
 def generate_ai_subtitles(
     video_path: str,
     plan: CandidatePlan,
     output_path: str,
+    category: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     用 GPT-4o Vision 看每个镜头关键帧，生成英文广告文案字幕。
@@ -808,152 +1202,104 @@ def generate_ai_subtitles(
     if not openai_available:
         logger.warning("  openai 库未安装，AI字幕跳过")
         return (False, "")
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        logger.warning("  OPENAI_API_KEY 未设置，AI字幕跳过")
+    client, model_name = get_ai_client()
+    if not client:
+        logger.warning("  未配置 MiniMax 或 OpenAI API Key，AI字幕跳过")
         return (False, "")
 
-    logger.info("  [AI字幕] GPT-4o Vision 生成中...")
-    client = OpenAI(api_key=api_key)
+    logger.info(f"  [AI字幕] {model_name} Vision 生成中...")
 
     temp_dir = Path(tempfile.mkdtemp(prefix="ai_subtitle_"))
     try:
-        # 1. 计算字幕时间轴：每 2-4 秒一条，对齐到镜头边界
         main_info = get_video_info(video_path)
         if not main_info:
             return (False, "")
-        total_duration = main_info.duration
+        segments = build_subtitle_segments(plan, main_info.duration, category)
+        if not segments:
+            return (False, "")
 
-        # 用 plan.clips 的边界做分割点，每 2-4 秒一条
-        boundaries = [0.0]
-        current = 0.0
-        for clip in plan.clips:
-            current += clip.duration
-            if current - boundaries[-1] >= 2.0:
-                boundaries.append(round(current, 2))
-        if boundaries[-1] < total_duration - 0.5:
-            boundaries.append(round(total_duration, 2))
-        # 确保最后一条不超过视频时长
-        boundaries[-1] = min(boundaries[-1], total_duration)
-
-        subtitle_segments = []
-        for i in range(len(boundaries) - 1):
-            start = boundaries[i]
-            end = boundaries[i + 1]
-            mid = (start + end) / 2
-            subtitle_segments.append({"start": start, "end": end, "mid": mid})
-
-        # 2. 提取每段中间帧
-        frames = []
-        for seg in subtitle_segments:
-            frame_path = temp_dir / f"frame_{len(frames):03d}.jpg"
-            if extract_frame(video_path, seg["mid"], str(frame_path)):
-                frames.append(str(frame_path))
+        role_intent = {
+            "emotion_hook": "open with the emotional reason to care about the product",
+            "quality": "state one visible material, construction, or durability benefit",
+            "memory": "express the lasting emotional value or memory",
+            "customization": "explain the visible personalization action or option",
+        }
+        for index, segment in enumerate(segments):
+            fallback = segment.text
+            # 提取3帧：开头/中间/结尾，横向拼接后发给AI
+            times = [
+                segment.start + (segment.end - segment.start) * t
+                for t in [0.2, 0.5, 0.8]
+            ]
+            frames = []
+            for ft in times:
+                fp = temp_dir / f"frame_{index:03d}_{len(frames):03d}.jpg"
+                if not extract_frame(video_path, ft, str(fp)):
+                    logger.warning(f"  AI字幕第{index + 1}段取帧失败，使用完整模板")
+                    break
+                frames.append(cv2.imread(str(fp)))
             else:
-                logger.warning(f"  帧提取失败: {seg['mid']:.2f}s")
-
-        if not frames:
-            return (False, "")
-
-        # 3. 批量发给 GPT-4o（每帧一条文案）
-        subtitle_texts = []
-        for i, frame_path in enumerate(frames):
-            try:
-                with open(frame_path, "rb") as f:
-                    image_data = f.read()
+                # 所有3帧都提取成功，横向拼接
+                target_h = min(f.shape[0] for f in frames)
+                frames = [cv2.resize(f, (int(f.shape[1] * target_h / f.shape[0]), target_h)) for f in frames]
+                combined = cv2.hconcat(frames)
                 import base64
-                b64 = base64.b64encode(image_data).decode("utf-8")
-
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a short-form video ad copywriter. "
-                                "Look at the product image and write ONE short English subtitle line "
-                                "(max 8 words). Style: elegant, emotional, lifestyle ad captions. "
-                                "Examples: 'Carry love wherever you go', 'Small things, big feelings', "
-                                "'Every detail tells a story'. Reply with ONLY the subtitle text, no quotes."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{b64}",
-                                        "detail": "low",
+                _, buf = cv2.imencode('.jpg', combined)
+                b64 = base64.b64encode(buf).decode('utf-8')
+                try:
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You write on-screen copy for a coherent short-form product ad. "
+                                    "Return exactly one complete standalone English caption of 2-10 words. "
+                                    "Never use an ellipsis, a sentence fragment, quotation marks, a label, "
+                                    "a hashtag, or a trailing period. Describe only what the frames show."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            f"Product category: {category or 'product'}. "
+                                            f"Narrative role: {segment.role} — {role_intent.get(segment.role, '')}. "
+                                            f"Safe fallback: {fallback}"
+                                        ),
                                     },
-                                }
-                            ],
-                        },
-                    ],
-                    max_tokens=30,
-                    temperature=0.8,
-                )
-                text = response.choices[0].message.content.strip().strip('"').strip("'")
-                if text:
-                    subtitle_texts.append(text)
-                    logger.info(f"  [{i+1}/{len(frames)}] {text}")
-                else:
-                    subtitle_texts.append("")
-            except Exception as e:
-                logger.warning(f"  GPT-4o 第{i+1}帧失败: {e}")
-                subtitle_texts.append("")
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{b64}",
+                                            "detail": "low",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                        max_tokens=40,
+                        temperature=0.5,
+                    )
+                    raw_text = response.choices[0].message.content or ""
+                    segment.text = normalize_ad_caption(raw_text, fallback)
+                    logger.info(
+                        "  AI字幕 [%d/%d] %s: %s",
+                        index + 1, len(segments), segment.role, segment.text,
+                    )
+                except Exception as e:
+                    logger.warning(f"  {model_name} 第{index + 1}段失败，使用完整模板: {e}")
+                    segment.text = fallback
 
-        # 4. 生成 ASS 文件
-        ass_path = temp_dir / "subtitle.ass"
-        with open(ass_path, "w", encoding="utf-8") as f:
-            f.write("[Script Info]\n")
-            f.write("Title: subtitle\n")
-            f.write("Original Script: \n")
-            f.write("PlayResX: 2160\n")
-            f.write("PlayResY: 3840\n")
-            f.write("ScriptType: v4.00+\n")
-            f.write("WrapStyle: 0\n\n")
-
-            f.write("[V4+ Styles]\n")
-            f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-            f.write("Style: Default,Microsoft YaHei,72,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,2,2,80,80,150,1\n\n")
-
-            f.write("[Events]\n")
-            f.write("Format: Layer, Start, End, Style, Text\n")
-
-            for i, seg in enumerate(subtitle_segments):
-                text = subtitle_texts[i] if i < len(subtitle_texts) else ""
-                if not text:
-                    continue
-                f.write(
-                    f"Dialogue: 0,{format_ass_time(seg['start'])},"
-                    f"{format_ass_time(seg['end'])},Default,{escape_ass_text(text)}\n"
-                )
-
-        logger.info(f"  AI字幕ASS生成: {ass_path}")
-
-        # 5. 烧录字幕
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", os.path.abspath(video_path),
-            "-vf", f"ass={ass_path.name}",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            os.path.abspath(output_path),
-        ]
-
-        if not run_ffmpeg(cmd, "  烧录AI字幕", cwd=str(temp_dir)):
+        optimize_subtitle_positions(video_path, segments)
+        if not burn_subtitle_segments(
+            video_path, output_path, segments, temp_dir, "  烧录AI字幕"
+        ):
             return (False, "")
 
-        # 6. 验证字幕可见
-        fake_segments = [{"start": s["start"], "end": s["end"]} for s in subtitle_segments]
-        if not verify_burned_subtitles(video_path, output_path, fake_segments):
-            return (False, "")
-
-        subtitle_text = " ".join(t for t in subtitle_texts if t)
+        subtitle_text = " ".join(segment.text for segment in segments)
         logger.info(f"  AI字幕烧录完成: {output_path}")
         return (True, subtitle_text)
 
@@ -1005,7 +1351,7 @@ def verify_burned_subtitles(
     rendered_path: str,
     segments: list[dict],
 ) -> bool:
-    """通过活动字幕区域与顶部对照区的像素变化，验证硬字幕确实可见。"""
+    """按字幕实际位置比较像素变化，验证上/中/下动态硬字幕可见。"""
     check_dir = Path(tempfile.mkdtemp(prefix="subtitle_verify_"))
     try:
         checked = 0
@@ -1037,12 +1383,22 @@ def verify_burned_subtitles(
                 cv2.COLOR_BGR2GRAY,
             )
             height = difference.shape[0]
-            subtitle_band = difference[int(height * 0.55):int(height * 0.95)]
-            control_band = difference[:int(height * 0.35)]
-            subtitle_change = float(np.mean(subtitle_band > 20))
-            control_change = float(np.mean(control_band > 20))
+            position = segment.get("position")
+            positions = [position] if position in SUBTITLE_POSITION_Y else list(SUBTITLE_POSITION_Y)
+            band_changes: dict[str, float] = {}
+            for name, output_y in SUBTITLE_POSITION_Y.items():
+                center_y = int(output_y / OUTPUT_HEIGHT * height)
+                half_band = max(12, int(height * 0.08))
+                y0, y1 = max(0, center_y - half_band), min(height, center_y + half_band)
+                band_changes[name] = float(np.mean(difference[y0:y1] > 20))
+
+            subtitle_change = max(band_changes[name] for name in positions)
+            control_values = [
+                change for name, change in band_changes.items() if name not in positions
+            ]
+            control_change = float(np.median(control_values)) if control_values else 0.0
             checked += 1
-            if subtitle_change > max(0.0015, control_change * 1.35):
+            if subtitle_change > max(0.0010, control_change * 1.30):
                 logger.info(
                     "  字幕像素验证通过: 字幕区 %.3f%% / 对照区 %.3f%%",
                     subtitle_change * 100,
@@ -1060,116 +1416,43 @@ def stage5_generate_subtitle(
     video_path: str,
     output_path: str,
     whisper_model: str = "base",
-    language: Optional[str] = None
+    language: Optional[str] = None,
+    plan: Optional[CandidatePlan] = None,
+    category: Optional[str] = None,
 ) -> tuple[bool, str]:
-    """Whisper字幕生成和烧录，返回(是否成功, 字幕文本)"""
-    logger.info(f"[Stage 5] 字幕生成: {Path(video_path).name}")
-
-    if not whisper_available:
-        logger.error("Whisper 未安装")
-        return (False, "")
-
-    temp_dir: Optional[Path] = None
+    """无 API 字幕：使用完整广告模板；Whisper 不再直接作为上屏文案。"""
+    logger.info(f"[Stage 5] 无API完整广告字幕: {Path(video_path).name}")
+    # 保留参数以兼容既有 CLI；转写不再直接决定屏幕上的广告文案。
+    _ = (whisper_model, language)
+    temp_dir = Path(tempfile.mkdtemp(prefix="fallback_subtitle_"))
     try:
-        # 先提取音频到临时文件（Whisper需要直接音频文件）
-        temp_dir = Path(tempfile.mkdtemp(prefix="whisper_audio_"))
-        audio_path = temp_dir / "audio.wav"
-
-        # 提取音频
-        extract_cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-vn",  # 不要视频
-            "-acodec", "pcm_s16le",
-            "-ar", "16000",
-            "-ac", "1",  # 单声道
-            str(audio_path)
-        ]
-
-        if not run_ffmpeg(extract_cmd, "  提取音频"):
-            shutil.copy2(video_path, output_path)
-            return (True, "")
-
-        # 加载模型
-        model = whisper.load_model(whisper_model, device="cpu")
-
-        # 语音识别
-        logger.info("  Whisper 识别中...")
-        options = {"task": "transcribe"}
-        if language:
-            options["language"] = language
-
-        result = model.transcribe(str(audio_path), **options)
-
-        if not result["segments"]:
-            logger.warning("  未识别到语音")
-            shutil.copy2(video_path, output_path)
-            return (True, "")
-
-        # 收集字幕文本供BGM选择使用
-        subtitle_text = " ".join(seg["text"].strip() for seg in result["segments"] if seg["text"].strip())
-
-        segments = [segment for segment in result["segments"] if segment["text"].strip()]
-        ass_path = temp_dir / "subtitle.ass"
-
-        with open(ass_path, "w", encoding="utf-8") as f:
-            f.write("[Script Info]\n")
-            f.write("Title: subtitle\n")
-            f.write("Original Script: \n")
-            f.write("PlayResX: 2160\n")
-            f.write("PlayResY: 3840\n")
-            f.write("ScriptType: v4.00+\n")
-            f.write("WrapStyle: 0\n\n")
-
-            f.write("[V4+ Styles]\n")
-            f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-            f.write("Style: Default,Microsoft YaHei,72,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,2,2,80,80,150,1\n")
-
-            f.write("[Events]\n")
-            f.write("Format: Layer, Start, End, Style, Text\n")
-
-            for segment in segments:
-                text = segment["text"].strip()
-                if not text:
-                    continue
-                start = float(segment["start"])
-                end = float(segment["end"])
-                # 静态字幕：整句一次性显示，不再逐字出现
-                f.write(
-                    f"Dialogue: 0,{format_ass_time(start)},"
-                    f"{format_ass_time(end)},Default,{escape_ass_text(text)}\n"
-                )
-
-        logger.info(f"  ASS字幕生成: {ass_path}")
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", os.path.abspath(video_path),
-            "-vf", f"ass={ass_path.name}",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            os.path.abspath(output_path),
-        ]
-
-        if not run_ffmpeg(cmd, "  烧录字幕", cwd=str(temp_dir)):
+        video_info = get_video_info(video_path)
+        if not video_info:
             return (False, "")
-
-        if not verify_burned_subtitles(video_path, output_path, segments):
+        if plan is None:
+            plan = CandidatePlan(
+                id=0,
+                clips=[Clip(video_path, 0.0, video_info.duration, video_info.duration)],
+                total_duration=video_info.duration,
+            )
+        segments = build_subtitle_segments(plan, video_info.duration, category)
+        evidence = transcribe_subtitle_evidence(
+            video_path, temp_dir, whisper_model, language
+        )
+        apply_transcript_role_evidence(segments, evidence, category)
+        optimize_subtitle_positions(video_path, segments)
+        if not burn_subtitle_segments(
+            video_path, output_path, segments, temp_dir, "  烧录无API完整字幕"
+        ):
             return (False, "")
-
-        logger.info(f"  字幕烧录完成: {output_path}")
-
+        subtitle_text = " ".join(segment.text for segment in segments)
+        logger.info("  无API字幕烧录完成: %s", output_path)
         return (True, subtitle_text)
-
     except Exception as e:
-        logger.error(f"字幕生成异常: {e}")
+        logger.error(f"无API字幕生成异常: {e}")
         return (False, "")
     finally:
-        if temp_dir is not None:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def format_ass_time(seconds: float) -> str:
@@ -1493,9 +1776,9 @@ def main():
     parser.add_argument("--scene-threshold", type=float, default=30.0,
                         help="场景检测阈值 (默认: 30.0)")
     parser.add_argument("--whisper-model", default="base",
-                        help="Whisper模型 (默认: base)")
+                        help="无API时用于镜头语义定位的Whisper模型 (默认: base)")
     parser.add_argument("--language", type=str, default=None,
-                        help="字幕语言 (默认: 自动识别)")
+                        help="Whisper语义证据语言 (默认: 自动识别)")
     parser.add_argument("--allow-heuristic-fallback", action="store_true",
                         help="无AI凭据时使用启发式规划")
     parser.add_argument("--overwrite", action="store_true",
@@ -1536,10 +1819,11 @@ def main():
         return 1
 
     # 检查凭据
-    has_openai_key = bool(os.environ.get("OPENAI_API_KEY"))
+    ai_client, ai_model = get_ai_client()
+    has_ai = ai_client is not None
 
-    if not has_openai_key and not args.allow_heuristic_fallback:
-        logger.error("未配置 OpenAI API Key，必须使用 --allow-heuristic-fallback 启用启发式规划")
+    if not has_ai and not args.allow_heuristic_fallback:
+        logger.error("未配置任何 AI API Key（MiniMax / OpenAI），必须使用 --allow-heuristic-fallback 启用启发式规划")
         return 1
 
     # ===== Stage 1: 扫描素材 =====
@@ -1555,21 +1839,18 @@ def main():
         materials_with_scenes.append((video_info, scenes))
 
     # ===== Stage 3: 剪辑规划 =====
-    quality_exclusions = load_quality_exclusions(args.category)
-    if has_openai_key:
-        logger.info("使用AI规划 (需要OpenAI SDK)")
+    if has_ai:
+        logger.info(f"使用AI规划 ({ai_model})")
         # TODO: 实现AI规划
         candidates = stage3_heuristic_planning(
             materials_with_scenes,
             args.candidates,
-            quality_exclusions,
         )
     else:
         logger.info("使用启发式规划")
         candidates = stage3_heuristic_planning(
             materials_with_scenes,
             args.candidates,
-            quality_exclusions,
         )
 
     if not candidates:
@@ -1605,30 +1886,33 @@ def main():
             logger.error(f"方案{plan.id} 视频合成失败")
             continue
         clean_info = get_video_info(clean_video)
-        if (
-            not clean_info
-            or not (TARGET_DURATION_MIN <= clean_info.duration <= TARGET_DURATION_MAX + 0.20)
-        ):
-            logger.error(
-                "方案%d 主体时长验收失败: %s",
-                plan.id,
-                f"{clean_info.duration:.2f}s" if clean_info else "不可读取",
-            )
+        if not clean_info:
+            logger.error("方案%d主体视频不可读取", plan.id)
             continue
+        if not (DURATION_SOFT_MIN <= clean_info.duration <= DURATION_SOFT_MAX):
+            logger.warning(
+                "方案%d主体 %.2fs，偏离约15秒软目标但继续后续流程",
+                plan.id, clean_info.duration,
+            )
 
         # Stage 5: 字幕生成（优先 AI 视觉字幕，回退到 Whisper）
         subtitle_success = False
         subtitle_text = ""
-        if openai_available and os.environ.get("OPENAI_API_KEY"):
+        if openai_available and get_ai_client()[0] is not None:
             subtitle_success, subtitle_text = generate_ai_subtitles(
-                clean_video, plan, subtitle_video
+                clean_video, plan, subtitle_video, args.category
             )
             if not subtitle_success:
                 logger.info("  AI字幕未成功，回退到Whisper流程")
 
         if not subtitle_success:
             subtitle_success, subtitle_text = stage5_generate_subtitle(
-                clean_video, subtitle_video, args.whisper_model, args.language
+                clean_video,
+                subtitle_video,
+                args.whisper_model,
+                args.language,
+                plan=plan,
+                category=args.category,
             )
 
         if not subtitle_success:
@@ -1679,7 +1963,6 @@ def main():
             }
             for plan in candidates
         ],
-        "quality_exclusions_applied": quality_exclusions,
     }
 
     manifest_path = os.path.join(output_dir, "manifest.json")

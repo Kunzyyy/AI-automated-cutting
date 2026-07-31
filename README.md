@@ -1,152 +1,198 @@
-# AI 自动剪辑工具 (AI Automated Cutting)
+# AI Automated Cutting
 
-> 将多个AI生成的基础素材，自动剪辑成带有BGM、字幕、公司商标的成品视频
+面向电商短视频的 AI 自动剪辑工作流：理解多段基础素材的内容和动作顺序，自动生成 1–2 条有叙事逻辑、字幕、BGM，并带固定平销片尾的竖屏广告成片。
 
----
+> 项目正在从 V1 启发式脚本升级到 V2「全素材理解 + AI 导演 + 确定性渲染」架构。当前仓库中的 `run_workflow.py` 是可复用的渲染原型，不代表 V2 已经完成。
 
-## 📋 项目概述
+## 当前试点：纪念别针
 
-给AI喂入多个基础素材（720×1280, ~15秒），自动剪辑成**2-3个**成品视频（2160×3840, 16-22秒），供人工挑选。
+参考素材位于：
 
-### 成品规格
-| 参数 | 基础素材 | 成品 |
-|------|----------|------|
-| 分辨率 | 720×1280 | 2160×3840 (4K竖屏) |
-| 时长 | ~15秒 | 16-22秒主体 + 3.37秒片尾 |
-| 音频 | 有原声 | BGM替换（无人声）+ 片尾打字音效 |
-| 字幕 | 无 | AI视觉生成英文文案（GPT-4o）/ Whisper回退 |
-
----
-
-## 🚀 快速开始
-
-### 1. 环境准备
-
-```bash
-# Python 3.9+
-pip install opencv-python scenedetect whisper openai numpy
-
-# FFmpeg 7.0+（需在系统PATH中）
-ffmpeg -version
+```text
+D:\doyobest\自动剪辑研究\别针\
+├── 基础素材\       # 4 段待剪原视频
+├── 成品素材\       # 人工成片参考
+└── temp_frames\    # b1–b4 为基础素材抽帧；f1/f2 为两条人工成片抽帧
 ```
 
-### 2. 准备素材
+固定片尾：
 
-```
-素材目录/
-├── 素材1.mp4    # 720×1280 竖屏视频
-├── 素材2.mp4
-└── ...
+```text
+D:\doyobest\视频自动剪辑workflow\平销片尾.mp4
 ```
 
-### 3. 准备片尾视频
+四段素材共同描述同一款纪念别针，包含开箱、选照片、输入定制文字、商品特写、佩戴以及日常陪伴等环节。系统不能把它们当作互不相关的视频随机取片，而应先识别镜头的叙事作用，再跨素材组合。
 
-将 `平销片尾.mp4`（1080×1920, 3.37秒, 含打字音效）放在脚本同目录下。
+## 成品要求
 
-### 4. 运行
+- 输入：同一商品的多段竖屏基础素材；试点为 4 段别针视频。
+- 输出：1–2 条可供投放或人工终审的竖屏成片。
+- 正文：目标约 15 秒，以叙事完整为优先，产品必须尽早出现。
+- 叙事：镜头之间有因果或广告表达逻辑，动作连续，不乱序拼接。
+- 字幕：根据完整成片逻辑统一生成，不按单镜头孤立编文案。
+- BGM：无人声、风格匹配、按节拍或段落做裁切和淡入淡出。
+- 片尾：固定拼接 `平销片尾.mp4`，保留片尾自身音效。
+- 基础验收：至少一次清晰商品特写、一次定制过程或核心卖点、一次佩戴/使用结果；无黑帧、重复镜头、断裂动作、字幕遮挡和音频爆音。
 
-```bash
-# 预设品类（自动推导输入输出目录）
-python run_workflow.py --category 别针 --allow-heuristic-fallback
+两条参考成片的共同结构可以概括为：
 
-# 或自定义目录
-python run_workflow.py --input "D:\素材目录" --output "D:\输出目录" --allow-heuristic-fallback
+```text
+商品/情感钩子 → 定制或品质卖点 → 佩戴/使用 → 情绪收束 → 固定 CTA 片尾
 ```
 
-### 5. 启用 AI 视觉字幕（可选）
+参考成片用于学习风格和最低结构，不作为逐帧照抄的唯一答案。自动版本应优先修正其镜头偏长、桌面动作重复、字幕与画面证据不完全对应等问题。
 
-```bash
-# 设置 OpenAI API Key 后，自动使用 GPT-4o 看画面生成英文字幕
-# 不设置则自动回退到 Whisper 语音识别
-set OPENAI_API_KEY=sk-你的Key       # Windows
-export OPENAI_API_KEY=sk-你的Key     # Linux/Mac
+## 为什么 V1 达不到预期
 
-python run_workflow.py --category 别针 --allow-heuristic-fallback
+旧脚本已调用多模态 API，但 AI 主要用于逐个 clip 看少量帧并生成字幕；真正决定“选哪段、按什么顺序、各用多长”的 Stage 3 仍是启发式规则。它会按画质分数、固定时长和随机扰动选片，无法理解完整故事，因此会出现：
+
+- 每个镜头单看合理，连起来却没有逻辑；
+- 同一动作被切碎、打乱或重复；
+- 字幕角色固定循环，文案和镜头证据错配；
+- BGM 按字幕关键词随机选择，不能跟随节奏和情绪；
+- 多生成几个候选只是扩大随机性，不等于提高剪辑质量。
+
+V1 仍可复用的部分包括：素材扫描、ffprobe、抽帧、场景检测、基础质量指标、FFmpeg 裁切/缩放/拼接、ASS 字幕烧录、片尾标准化和结果验收。后续会把它们拆成稳定的执行模块，而不是继续在单文件脚本里叠加创意规则。
+
+## V2 工作流
+
+```text
+上传任务
+  ↓
+素材探测与标准化
+  ↓
+场景/动作边界检测 + 关键帧/低清代理视频
+  ↓
+多模态模型理解全部素材
+  ↓
+Shot Cards（镜头卡：人物、商品、动作、阶段、画质、连续性）
+  ↓
+AI Director 生成 1–2 份结构化 EditPlan
+  ↓
+规则校验：证据匹配、动作顺序、重复度、时长、素材覆盖
+  ↓
+FFmpeg 生成无字幕毛片
+  ↓
+AI Reviewer 观看完整毛片
+  ├─ 不通过：按问题修改 EditPlan，最多重剪两次
+  └─ 通过：锁定叙事结构
+  ↓
+BGM 选曲/节拍对齐 + 全局字幕文案与版式
+  ↓
+固定片尾 + 技术质检 + 语义复审
+  ↓
+成片、EditPlan、质检报告
 ```
 
----
+### 1. Shot Card
 
-## ⚙️ 参数说明
+每个候选镜头必须先转换为结构化镜头卡。试点至少支持以下标签：
 
-| 参数 | 必选 | 说明 |
-|------|------|------|
-| `--category` | 三选一 | 摆件/别针/航海贴/衣服/露营贴 |
-| `--input` | 三选一 | 自定义输入目录 |
-| `--output` | 配对input | 自定义输出目录 |
-| `--allow-heuristic-fallback` | ✅ | 启用启发式规划 |
-| `--candidates` | 否 | 候选数（2或3，默认3） |
-| `--whisper-model` | 否 | Whisper模型（默认base） |
-| `--language` | 否 | 字幕语言（默认自动识别） |
-| `--overwrite` | 否 | 覆盖已有输出 |
-| `--keep-temp` | 否 | 保留中间文件 |
-| `--dry-run` | 否 | 只分析不渲染 |
-
----
-
-## 🔄 工作流程
-
-```
-Stage 1: 扫描素材目录 → 收集视频文件
-    ↓
-Stage 2: PySceneDetect 场景检测 → 识别镜头边界
-    ↓
-Stage 3: 启发式剪辑规划 → 生成2-3个候选方案（每个16-22秒）
-    ↓
-Stage 4: FFmpeg视频合成 → 裁剪片段 + 拼接 + 4K放大
-    ↓
-Stage 5: 字幕生成
-    ├─ 有API Key → GPT-4o看帧生成英文广告文案
-    └─ 无API Key → Whisper语音识别生成字幕
-    ↓
-Stage 5.5: BGM替换 → 用BGM替换视频音轨（去除原声人声）
-    ↓
-Stage 6: 片尾拼接 → 拼接商标片尾（保留打字音效）
-    ↓
-输出: 2-3个候选成品视频
+```text
+unboxing
+product_macro
+multiple_variants
+photo_selection
+text_customization
+wearing_action
+wearing_result
+touching_memory
+gift_box
+daily_life
+emotional_close
 ```
 
----
+除语义标签外，还需记录：源文件、起止时间、人物/服装/商品身份、动作前后状态、主体位置、清晰度、运动强度、转场可用性和与相邻镜头的连续性。
 
-## 📁 输出文件
+### 2. EditPlan
 
+AI 不直接操作 FFmpeg，而是输出可校验的 JSON 决策。例如：
+
+```json
+{
+  "narrative": "从照片定制到日常陪伴",
+  "target_duration": 18,
+  "clips": [
+    {
+      "source": "source_04.mp4",
+      "start": 0.8,
+      "end": 3.2,
+      "role": "photo_selection",
+      "caption_intent": "customization",
+      "transition": "cut"
+    }
+  ],
+  "music": {
+    "mood": "warm_memory",
+    "energy_curve": "gentle_rise"
+  }
+}
 ```
-输出目录/
-├── candidate_01.mp4              # 成品1（最终版）
-├── candidate_02.mp4              # 成品2
-├── candidate_01_clean.mp4        # 中间：干净视频（无字幕无BGM）
-├── candidate_01_subtitle.mp4     # 中间：带字幕（无BGM无片尾）
-├── candidate_01_bgm.mp4          # 中间：带字幕+BGM（无片尾）
-└── manifest.json                 # 方案信息
+
+渲染前必须进行确定性校验：时间范围合法、动作未逆序、定制类字幕确有手机/平板画面证据、没有高相似连续镜头，并满足成品硬性要求。失败时只把具体错误反馈给 AI 修订 EditPlan，不盲目重跑全部流程。
+
+### 3. 字幕与 BGM
+
+字幕应在剪辑结构确定后，结合完整 EditPlan 和毛片统一生成。文案表达的是广告信息，而不是机械描述画面；同时必须有镜头证据支持。字幕位置需根据主体区域动态避让，并使用高对比字体、描边和安全边距。
+
+BGM 应由整体情绪、节奏和目标时长共同决定。Worker 负责分析 BPM/段落/强拍，对入点、切点和结尾做对齐，并在拼接固定片尾时正确处理两段音频。
+
+## n8n 交付架构
+
+n8n 用作业务编排层，视频计算由独立 Worker 完成：
+
+```text
+Webhook/Form
+  → 创建 job_id、保存素材
+  → HTTP 调用 Video Worker
+  → 轮询或接收回调
+  → Reviewer 评分与最多两次自动重剪
+  → 人工审核（可选）
+  → 上传成片/发送下载地址
+  → 记录 EditPlan、日志、耗时和失败原因
 ```
 
----
+建议交付物：
 
-## 🛠 技术栈
+- 可导入的 `n8n/workflow.json`；
+- 容器化的 Python Video Worker；
+- `POST /jobs`、`GET /jobs/{id}`、回调接口；
+- 对象存储或共享盘适配器，避免大视频在 n8n 节点间反复传输；
+- Prompt、JSON Schema、品类模板和固定资产配置；
+- 一键启动说明、示例任务、验收样片和错误重试策略。
 
-| 模块 | 技术 | 说明 |
-|------|------|------|
-| 场景检测 | PySceneDetect | 镜头边界识别 |
-| 视频处理 | FFmpeg | 裁剪、拼接、放大、字幕烧录、音轨替换 |
-| 字幕-AI | GPT-4o Vision | 看画面生成英文广告文案 |
-| 字幕-回退 | Whisper | 语音识别生成字幕 |
-| 质量评估 | OpenCV | 清晰度/亮度/对比度打分 |
+Dify 可用于 Prompt 调试或 AI Director 子流程，但最终交付优先以 n8n 做总编排，因为它更适合文件流转、HTTP Worker、回调、审批和失败重试。Dify/n8n 都不承担 FFmpeg 长任务本身。
 
----
+## 当前仓库
 
-## 📝 注意事项
+```text
+.
+├── run_workflow.py          # V1 原型：分析、规划、字幕、BGM、渲染集中在单文件
+├── test_workflow.py         # V1 单元测试
+├── prompt_templates.md      # 旧 Prompt 记录，V2 将改为结构化 Schema
+├── handoff.md               # 历史交接记录
+└── 竞品调研报告.md
+```
 
-1. **片尾视频**：`平销片尾.mp4` 需单独准备（不在Git仓库中），放在脚本同目录
-2. **BGM音乐库**：默认读取 `C:/Users/Lenovo/Desktop/music experiment/` 目录，可修改 `BGM_LIBRARY_PATH`
-3. **API Key 安全**：`OPENAI_API_KEY` 通过环境变量传入，不写入代码，推送到GitHub不会泄露
-4. **中文字幕路径**：FFmpeg concat 不支持中文路径，脚本内部已用temp短路径处理
+当前脚本可用于验证 FFmpeg 渲染链路，但不应作为最终工作流的质量基线。仓库下一步会逐步拆分为 `analyzer`、`director`、`validator`、`renderer`、`reviewer` 和 `api` 模块。
 
----
+## 下一里程碑
 
-## 📚 相关文档
+第一版可交付 MVP 只聚焦“别针”样例，不先做全品类泛化：
 
-- [交接文档](./handoff.md) - 完整开发历史和问题记录
-- [Prompt模板](./prompt_templates.md) - AI决策的Prompt设计
+1. 为四段素材生成可检查的 Shot Cards；
+2. 生成两套叙事不同且通过规则校验的 EditPlan；
+3. 渲染无字幕毛片并完成 AI Reviewer 闭环；
+4. 在通过评审的结构上加入全局字幕、BGM 和固定片尾；
+5. 将同一条 Python 流程封装为 Job API；
+6. 导出 n8n 工作流并完成端到端验收。
 
----
+## 安全说明
 
-*本项目正在开发中*
+- API Key 仅通过环境变量或部署平台 Secret 注入，不提交到仓库。
+- 本地绝对路径只用于当前试点，正式 Worker 必须改为参数或配置项。
+- 原始素材、临时帧、BGM 和成片默认不提交 Git；生产环境使用对象存储或挂载卷。
+
+## License
+
+当前仓库尚未添加开源许可证。在许可证明确之前，请勿假设代码可对外再分发。

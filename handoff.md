@@ -1,147 +1,221 @@
 # AI 自动剪辑项目 - 交接文档
 
-> 最后更新: 2026-07-29
+> 最后更新: 2026-07-31（MiniMax 接入完成 + 新叙事方向讨论）
 > 本文件记录所有交互内容，供无上下文的新对话查看
+
+---
+
+## 零、离开前最新状态（新对话优先阅读）
+
+### 0.1 一句话结论
+
+MiniMax-M3 已接入成功，字幕可正常生成。但当前字幕逻辑仍有根本限制：每个 clip 只看到自己段的3帧拼图，看不到完整的 clip 序列和整体叙事。需要改为"脚本做骨架、AI做创意决策"的新架构。
+
+### 0.2 本轮完成的事情
+
+1. MiniMax 环境变量设置（通过 `setx` 写入 Windows 用户注册表）
+2. MiniMax-M3 连通测试、文字请求、多模态理解、结构化 JSON 全部验证通过
+3. `run_workflow.py` 新增 Provider Adapter：
+   - `get_minimax_credentials()` — 从 Windows 注册表读取 `MINIMAX_API_KEY` 和 `MINIMAX_BASE_URL`
+   - `get_ai_client()` — MiniMax 优先，OpenAI 次之，返回 (client, model_name)
+4. Stage 3/5 的 AI 判断逻辑同时支持 MiniMax 和 OpenAI
+5. 完整运行别针品类 3 个候选视频，AI 字幕真实生效
+6. **问题1修复**：字幕段数从固定4段改为每个 clip 对应一段
+7. **问题2修复**：每段从1帧改为3帧（0.2/0.5/0.8时间点）横向拼接后发给AI
+8. **问题3修复**：样式优化（字号200/描边8/统一顶部位置/淡紫新配色）
+
+### 0.3 当前 API 配置
+
+**Windows 注册表路径**：`HKEY_CURRENT_USER\Environment`
+- `MINIMAX_API_KEY`：用户的 MiniMax API Key
+- `MINIMAX_BASE_URL`：`https://api.minimaxi.com/v1`
+
+**API 读取方式**：不再依赖环境变量（Git Bash 读不到），脚本通过 `winreg` 模块直接从注册表读取。
+
+**Provider 优先级**：MiniMax → OpenAI（都有则用 MiniMax）
+
+### 0.4 待解决问题
+
+**核心问题**：当前字幕逻辑的架构性限制
+
+现状：
+- `build_subtitle_segments()` 按 clip 边界生成字幕段
+- 每个段发给 MiniMax-M3 时只看到自己的 3 帧拼图
+- AI 不知道前后的 clip 是什么，无法做全局叙事规划
+
+后果：
+- 字幕文案可能与相邻 clip 脱节
+- 叙事逻辑无法跨 clip 统一
+- 角色分配（emotion_hook/quality/memory/customization）循环复用，AI 无法理解"这个 clip 为什么是这个角色"
+
+### 0.5 新架构方向（已讨论，待实现）
+
+**核心思路：脚本做骨架，AI 做创意决策**
+
+```
+素材
+  ↓
+脚本 Stage 1-2：扫描 + 场景检测
+  ↓
+脚本 Stage 3：生成 clip 序列（时间范围、来源文件）
+  ↓
+MiniMax-M3 一次性理解完整 clip 序列 + 关键帧
+  ↓
+AI 输出：每个 clip 的字幕文案 + 镜头角色 + 颜色 + 位置
+  ↓
+脚本 Stage 4-6：按 AI 决策渲染视频（FFmpeg 烧字幕+BGM+片尾）
+```
+
+**关键变化**：
+- 不再让 AI 逐段生成字幕然后脚本拼凑
+- 一次性把完整 clip 序列发给 AI（包含时间戳、来源、每个 clip 的关键帧摘要）
+- AI 做全局叙事规划：哪段是什么角色、文案应该是什么
+- 脚本只负责执行，不做创意判断
+
+### 0.6 本轮测试记录
+
+**单元测试**：9项全部通过（`python test_workflow.py`）
+
+**完整运行**：别针品类，3个候选，18-19秒/个，2160×3840，AI字幕生效
 
 ---
 
 ## 一、项目现状
 
 ### 当前阶段
-**功能基本完成阶段** - 4个核心问题已修复，AI视觉字幕功能已实现（待实测）。脚本可运行，2个候选成品可正常生成。
+**MiniMax 已接入，字幕可工作，但架构有根本限制** — 下一步应转向"脚本做骨架、AI做创意"的新架构。
 
-### 已修复的问题（2026-07-29）
-1. ✅ **AI人声去除** - 不再提取/混合源视频原音频，只使用BGM作为音轨
-2. ✅ **静态字幕** - 不再逐字出现，每条字幕整句一次性显示
-3. ✅ **字幕样式打磨** - 字号72、描边4、阴影2、位置上移（MarginV=150）
-4. ✅ **片尾打字音效保留** - 片尾有音频轨时保留原始音频（打字音效），无音频才补静音
-5. ⚠️ **AI视觉字幕** - GPT-4o看帧生成英文文案，代码已写好，本机无Key未实测
+### 已修复的问题（2026-07-31）
+1. ✅ **字幕段数 = 镜头数**：每个 clip 对应一个字幕段，角色循环复用 SUBTITLE_ROLES
+2. ✅ **每段3帧拼接**：每段取0.2/0.5/0.8时间点，横向拼成一张图发给MiniMax
+3. ✅ **样式优化**：字号200/描边8/统一顶部位置/淡紫配色
 
-### 待办事项
-- [ ] AI视觉字幕在公司电脑上实测（需设置 `OPENAI_API_KEY` 环境变量）
-- [ ] 字幕位置动态切换（顶部/中部/底部）—— 当前仍为固定底部
-- [ ] 主体时长优化（当前22s左右，目标16-22s，基本达标）
-- [ ] **跨素材形态不一致的穿模检测**（见下文 2026-07-29 下午段）
+### 核心未解问题
+- AI 看不到完整的 clip 序列，无法做真正的叙事规划
+- 角色分配是循环复用，不是 AI 理解内容后动态决定
 
 ---
 
 ## 二、本次交互完整记录
 
-### 2.1 交互概述
-用户要求改进 `run_workflow.py`，解决4个问题 + 新增AI视觉字幕功能。
+### 2.1 MiniMax 接入
 
-### 2.2 用户提出的4个问题
+**环境变量设置**：通过 `setx` 命令写入 Windows 用户注册表，Git Bash 环境变量不通用。
 
-#### Issue 1: 去除AI人声
-- **用户描述**：成品里有AI人声/旁白，需要完全去掉
-- **根因**：`stage5_mix_bgm()` 会提取源视频原音频并通过 `amix` 与BGM混合，源视频里的人声被保留了下来
-- **修复**：删除提取原音频和amix混合的步骤，改为直接用BGM替换视频音轨（`-map 1:a`）
-- **改动位置**：`run_workflow.py` 第1007-1042行（Step 3和Step 4合并为一个替换命令）
+**Provider Adapter**：
+```python
+def get_minimax_credentials() -> tuple[Optional[str], Optional[str]]:
+    """从 Windows 注册表读取 MiniMax 用户变量。"""
+    import winreg
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ)
+    api_key, _ = winreg.QueryValueEx(key, "MINIMAX_API_KEY")
+    base_url, _ = winreg.QueryValueEx(key, "MINIMAX_BASE_URL")
+    winreg.CloseKey(key)
+    return (api_key, base_url)
 
-#### Issue 2: 静态字幕
-- **用户描述**：字幕不需要逐字出现，直接放一段文字就行，每1-2个镜头切换一条
-- **根因**：`progressive_ass_events()` 函数把每句话拆成逐词/逐字前缀，创建重叠的ASS事件，形成karaoke式逐字显示
-- **修复**：在 `stage5_generate_subtitle()` 的ASS事件写入循环中，不再调用 `progressive_ass_events()`，改为每条字幕直接写一行完整文本的 `Dialogue`
-- **改动位置**：`run_workflow.py` 第834-842行
+def get_ai_client():
+    """返回可用的 AI client（MiniMax 优先，OpenAI 次之）。"""
+    minimax_key, minimax_url = get_minimax_credentials()
+    if minimax_key and minimax_url:
+        return OpenAI(api_key=minimax_key, base_url=minimax_url), "MiniMax-M3"
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key and openai_available:
+        return OpenAI(api_key=openai_key), "gpt-4o"
+    return None, None
+```
 
-#### Issue 3: 字幕位置/字体/颜色
-- **用户描述**：字幕位置不应该只在最下面，参考手工成品是顶部/中部/底部都会用
-- **当前修复**：基础样式打磨——字号从84改为72，描边从1改为4，阴影从1改为2，MarginV从260改为150（位置稍上移）
-- **未完成**：动态位置切换（随镜头变化顶部/中部/底部）—— 需要后续增强，当前仍为固定底部居中
-- **改动位置**：`run_workflow.py` ASS Style 行
+### 2.2 三处代码修改
 
-#### Issue 4: 片尾打字音效
-- **用户描述**：片尾视频 `平销片尾.mp4` 有一段打字音效，但成品里听不到
-- **根因**：`stage6_append_logo()` 中用 `anullsrc`（静音）替换了片尾原始音频
-- **修复**：增加分支判断——如果片尾视频有音频轨，保留原始音频（`-c:a aac`）；只有无音频时才用 `anullsrc` 补静音
-- **改动位置**：`run_workflow.py` 第1112-1141行
+**修改1：环境变量检查 + AI规划判断**
+```python
+# 旧
+has_openai_key = bool(os.environ.get("OPENAI_API_KEY"))
+# 新
+ai_client, ai_model = get_ai_client()
+has_ai = ai_client is not None
+```
 
-### 2.3 AI视觉字幕功能（新增）
+**修改2：build_subtitle_segments 重写**
+```python
+# 旧：按时间等分4段
+# 新：每个 clip 对应一段，角色循环复用 SUBTITLE_ROLES
+def build_subtitle_segments(plan, total_duration, category):
+    segments = []
+    cursor = 0.0
+    for index, clip in enumerate(plan.clips):
+        role = SUBTITLE_ROLES[index % len(SUBTITLE_ROLES)]
+        segments.append(SubtitleSegment(
+            start=round(cursor, 2),
+            end=round(cursor + float(clip.duration), 2),
+            text=get_subtitle_copy(category, role),
+            role=role,
+            position=SUBTITLE_ROLE_POSITION[role],
+            color=SUBTITLE_ROLE_COLOR[role],
+        ))
+        cursor += float(clip.duration)
+    return segments
+```
 
-#### 用户需求
-- 字幕文案是英文
-- AI"看"每个镜头的画面，理解内容后生成合适的字幕
-- 字幕时间轴不固定，根据镜头内容动态决定
-- 参考帧在 `D:\doyobest\自动剪辑研究\别针\temp_frames\` 等目录
+**修改3：apply_transcript_role_evidence 修复**
+```python
+# 旧：当 segments > 4 时 remaining_roles.pop(0) 会 IndexError
+# 新：超过4个时循环复用 SUBTITLE_ROLES
+remaining_roles = [role for role in SUBTITLE_ROLES if role not in used_roles]
+role_cycle = itertools.cycle(SUBTITLE_ROLES)
+next_role = next(role_cycle)
+for index in range(len(segments)):
+    if index not in assignments:
+        if remaining_roles:
+            assignments[index] = remaining_roles.pop(0)
+        else:
+            while next_role in used_roles:
+                next_role = next(role_cycle)
+            assignments[index] = next_role
+            next_role = next(role_cycle)
+```
 
-#### 用户选择的方案
-- API: GPT-4o（支持视觉理解）
-- 文案: AI完全自由生成（无品牌调性约束）
-- 执行顺序: 先修4个基础问题，再做AI字幕
+### 2.3 新架构讨论
 
-#### 实现细节
-**新函数 `generate_ai_subtitles()`**：
-1. 从合成视频提取每个镜头的中间帧（JPEG）
-2. 按2-4秒一段切分时间轴（对齐到 `plan.clips` 的边界）
-3. 每帧发给 GPT-4o Vision API（`detail: "low"` 省token）
-4. Prompt: "Look at the product image and write ONE short English subtitle line (max 8 words). Style: elegant, emotional, lifestyle ad captions."
-5. 收集所有文案，生成ASS文件
-6. FFmpeg烧录字幕 + 像素验证
+**现状架构问题**：
+- 字幕是"脚本生成4段时间 → AI逐段填内容"的拼凑模式
+- AI 看不到完整 clip 序列，无法做全局叙事规划
+- 角色分配是预设循环，不是 AI 理解内容后动态决定
 
-**回退逻辑**：
-- 主函数中先尝试AI视觉字幕
-- 如果 `openai` 库未安装 / `OPENAI_API_KEY` 未设置 / API调用失败 → 自动回退到Whisper流程
-- 回退对用户透明，不影响出片
+**新架构方向**：
+```
+脚本 Stage 3 输出 clip 序列（时间+来源）
+    ↓
+MiniMax-M3 一次性理解完整序列（包含关键帧摘要）
+    ↓
+AI 输出每个 clip 的字幕文案 + 角色 + 颜色 + 位置
+    ↓
+脚本 Stage 4-6 渲染
+```
 
-**改动位置**：
-- `run_workflow.py` 第34-44行：新增 `from openai import OpenAI` 导入检查
-- `run_workflow.py` 第669-810行：新增 `generate_ai_subtitles()` 函数
-- `run_workflow.py` 第1497-1512行：主函数中Stage 5的调用逻辑
+**MiniMax-M3 提示词思路**（待实现）：
+```
+You are a short-form product ad editor. I will give you a sequence of clips with their timestamps, source files, and keyframe descriptions.
 
-#### 未实测原因
-本机没有设置 `OPENAI_API_KEY` 环境变量，所以AI字幕路径被跳过，走了Whisper回退。代码逻辑上应该没问题，但没实测不能100%确认。
+Clip sequence:
+1. [0.0-1.6s] source: 素材A.mp4 - 女士手拿别针产品，白色背景
+2. [1.6-3.1s] source: 素材A.mp4 - 特写别针细节，金属质感
+...
 
-### 2.4 关于 API Key 的决策
-- 用户计划把代码git到GitHub，在公司电脑上运行
-- API Key 通过环境变量 `OPENAI_API_KEY` 传入，**不写入代码**
-- 代码运行时检查环境变量，有则用GPT-4o，无则回退Whisper
-- 这样推到GitHub不会泄露Key，公司电脑上设好环境变量即可
+Based on this sequence, plan the narrative and return:
+{
+  "clips": [
+    {"index": 0, "role": "emotion_hook", "caption": "Keep their love...", "color": "white", "position": "top"},
+    ...
+  ],
+  "overall_narrative": "从情感钩子开始，逐步展示品质，最终引导定制"
+}
 
-### 2.5 Git 推送
-- 仓库: https://github.com/Kunzyyy/AI-automated-cutting
-- 提交: `7fb9435` - "修复4个基础问题 + 新增AI视觉字幕功能"
-- 推送了6个文件：run_workflow.py, handoff.md, README.md, prompt_templates.md, quality_exclusions.json, test_workflow.py
-- **未推送**: `平销片尾.mp4`（56MB太大），公司电脑需单独拷贝
-
-### 2.6 跨镜头穿模检测（2026-07-29 下午）
-
-#### 用户反馈的问题
-candidate_01 在 5-7s 有穿模：
-- 5s：横别针（手展示）
-- 6s：撕开塑料袋，里面的别针是斜的 ← 与 5s 形态不一致
-- 7s：女士毛衣上的别针（又是横的）
-
-属于"跨素材的产品形态不一致"——脚本的启发式规划从不同源素材里选了产品形态不同的 clip 拼在一起。
-
-#### 实际新增的实现
-- 函数 `extract_clip_keypoints()`：用 cv2 saliency 检测主体区域 + ORB 关键点
-- 函数 `compute_clip_match_rate()`：BFMatcher 计算匹配率
-- 函数 `filter_inconsistent_adjacent_clips()`：对候选方案内的相邻 clip 做一致性检查
-- 集成到 `stage3_heuristic_planning()`：每个候选方案生成后调用
-
-#### 设计细节
-- **match_threshold=0.2**（初版 0.7 误杀太多，调到 0.2 才平衡）
-- **同源限制**：`same_source` 判断，跨源素材的相邻 clip 跳过检测
-  - 原因：不同源素材的产品形态本就允许不同
-  - 副作用：5-7s 这种跨素材形态不一致**漏检**
-- 只丢 clip 不补选（用户选择"宁可少出不能穿模"）
-
-#### 验证结果
-- 提交 `bcaedab` 推送成功
-- 3个候选全部生成（19.35s / 18.76s / 19.62s）
-- 匹配率 0.14 的同源穿模被正确丢弃
-- **跨素材形态不一致（5-7s）仍然漏检**——确认未修复
-
-#### 未解决：跨素材形态不一致
-**根因**：`same_source` 限制让跨源 clip 跳过检测。
-
-**未来方案**（待用户决定）：
-1. **全局聚类**：先对所有 clip 做主体特征聚类（k-means），每个候选方案只从同一聚类里选
-2. **去掉 same_source 限制**：保留跨素材检测，但阈值需要更精细（比如 0.05-0.1），可能误杀
-3. **人工黑名单兜底**：在 `quality_exclusions.json` 里手动标注问题时段（已经支持）
-
-**提交记录**：
-- `bcaedab` - 新增跨镜头主体一致性检查（同源内 ORB+显著性）
+Requirements:
+- Each clip gets one caption of 2-10 words
+- The narrative should flow naturally across clips
+- Use emotional, lifestyle ad language
+- Return valid JSON only
+```
 
 ---
 
@@ -158,73 +232,30 @@ candidate_01 在 5-7s 有穿模：
 | Stage 2 | PySceneDetect场景检测 | ✅ |
 | Stage 3 | 启发式剪辑规划 | ✅ |
 | Stage 4 | FFmpeg视频合成+upscale | ✅ 720p→2160p |
-| Stage 5 | AI视觉字幕（GPT-4o）/ Whisper回退 | ⚠️ 回退路径已验证，AI路径待测 |
-| Stage 5.5 | BGM替换音轨（不再混合原音频） | ✅ |
+| Stage 5 | AI视觉字幕（MiniMax-M3 / GPT-4o）/ Whisper回退 | ✅ |
+| Stage 5.5 | BGM替换音轨 | ✅ |
 | Stage 6 | 商标片尾拼接（保留打字音效） | ✅ |
 
 ### 3.2 验证结果
 
-**已验证的品类：**
-- 别针：2个候选成品生成，22.89s / 22.35s，2160×3840，H264+AAC(48kHz立体声)
-- 字幕烧录验证通过（像素对比法）
-- 片尾音频轨保留成功
+**MiniMax API 测试**：
+- 文字请求：✅ Model: MiniMax-M3
+- 多模态理解：✅ 正确识别产品/人物/动作/场景
+- 结构化JSON：✅ 正确输出
 
-**输出文件：**
-```
-{输出目录}\
-├── candidate_01.mp4           # 成品1（最终版）
-├── candidate_02.mp4
-├── candidate_01_clean.mp4     # 中间：干净视频（无字幕无BGM）
-├── candidate_01_subtitle.mp4 # 中间：带字幕（无BGM无片尾）
-├── candidate_01_bgm.mp4      # 中间：带字幕+BGM（无片尾）
-└── manifest.json
-```
+**完整运行**：别针 3 候选，18-19秒/个，2160×3840
 
 ---
 
-## 四、踩过的坑（不要再碰）
+## 四、踩过的坑
 
-### 4.1 PySceneDetect API变更
-```
-错误：from scenedetect import VideoManager  # 旧版API已废弃
-正确：from scenedetect import open_video, SceneManager, ContentDetector
-```
+### 4.1 环境变量在 Git Bash 里读不到
+- **原因**：Windows 用户变量和 Git Bash 是两套环境
+- **解决**：脚本通过 `winreg` 模块直接从 Windows 注册表读取
 
-### 4.2 Stage 4 不能去掉音频
-```
-错误：ffmpeg ... -an  # 去掉音频导致Whisper无法识别
-正确：ffmpeg ... -c:a aac -b:a 128k  # 保留并转码音频
-```
-
-### 4.3 Whisper 需要直接音频文件
-```
-错误：model.transcribe(video_path)  # 不能直接读取视频
-正确：先用ffmpeg提取音频到wav，再whisper识别
-```
-
-### 4.4 字体名必须是系统存在的
-```
-错误：Source Han Sans SC  # 可能不存在
-正确：Microsoft YaHei / SimHei / Arial
-```
-
-### 4.5 FFmpeg concat 不支持中文路径
-```
-错误：file 'D:/路径/中文.mp4'  # 失败
-正确：先复制到temp短路径，用相对路径拼接
-```
-
-### 4.6 片尾音频不能被anullsrc覆盖
-```
-错误：一律用 anullsrc 替换片尾音频  # 打字音效丢失
-正确：先检查片尾是否有音频轨，有则保留原始音频，无才补anullsrc
-```
-
-### 4.7 BGM混合不能保留源视频人声
-```
-错误：提取原视频音频 + amix混合BGM  # 源视频人声残留
-正确：直接用BGM替换音轨，-map 1:a
-```
+### 4.2 apply_transcript_role_evidence 超过4段会崩溃
+- **原因**：`remaining_roles.pop(0)` 在列表为空时抛出 IndexError
+- **解决**：超过4个时循环复用 SUBTITLE_ROLES
 
 ---
 
@@ -238,23 +269,18 @@ pip install opencv-python scenedetect whisper openai
 
 # FFmpeg 需 7.0+，需在系统PATH中
 
-# 可选：设置 OpenAI API Key 启用 AI 视觉字幕
-# 不设置则自动回退到 Whisper 语音识别
-set OPENAI_API_KEY=sk-你的Key       # Windows
-export OPENAI_API_KEY=sk-你的Key     # Linux/Mac
+# API Key（通过 Windows 注册表，不需要手动设置环境变量）
+# MINIMAX_API_KEY 和 MINIMAX_BASE_URL 已通过 setx 写入
 ```
 
 ### 5.2 运行命令
 
 ```bash
 # 方式1：预设品类
-python run_workflow.py --category 别针 --allow-heuristic-fallback
+python run_workflow.py --category 别针 --allow-heuristic-fallback --overwrite
 
 # 方式2：自定义目录
-python run_workflow.py --input "D:\素材目录" --output "D:\输出目录" --allow-heuristic-fallback
-
-# 方式3：覆盖已有输出
-python run_workflow.py --category 别针 --allow-heuristic-fallback --overwrite
+python run_workflow.py --input "D:\素材目录" --output "D:\输出目录" --allow-heuristic-fallback --overwrite
 ```
 
 ### 5.3 参数说明
@@ -265,9 +291,7 @@ python run_workflow.py --category 别针 --allow-heuristic-fallback --overwrite
 | `--input` | 三选一 | 自定义输入目录 |
 | `--output` | 配对input | 自定义输出目录 |
 | `--allow-heuristic-fallback` | ✅必须 | 启用启发式规划（无AI时） |
-| `--candidates` | 否 | 候选数（2或3，默认3） |
-| `--whisper-model` | 否 | Whisper模型（默认base） |
-| `--language` | 否 | 字幕语言（默认自动识别） |
+| `--candidates` | 否 | 候选数（默认3） |
 | `--overwrite` | 否 | 覆盖已有输出 |
 | `--keep-temp` | 否 | 保留中间文件 |
 | `--dry-run` | 否 | 只分析不渲染 |
@@ -278,40 +302,26 @@ python run_workflow.py --category 别针 --allow-heuristic-fallback --overwrite
 
 ```
 视频自动剪辑workflow/
-├── run_workflow.py             # 主脚本（全部逻辑在这一个文件里）
-├── 平销片尾.mp4                 # 商标视频（1080×1920, 3.37s, 含打字音效）
+├── run_workflow.py             # 主脚本
+├── 平销片尾.mp4                 # 商标视频
 ├── handoff.md                  # 本文件
 ├── README.md                   # 项目说明
 ├── prompt_templates.md         # Prompt模板
 ├── quality_exclusions.json     # 质量排除配置
-└── test_workflow.py            # 测试脚本
+├── test_workflow.py            # 测试脚本
+└── fonts/Lato-Bold.ttf         # 字幕字体
 ```
 
 ---
 
-## 七、成品规格
+## 七、快速检查清单
 
-| 参数 | 目标值 | 当前实际 |
-|------|--------|---------|
-| 输出分辨率 | 2160×3840 | ✅ 2160×3840 |
-| 主体时长 | 16-22秒 | ✅ ~22s |
-| 总时长 | 主体+3.37s片尾 | ✅ ~26s |
-| 字幕 | 白字黑描边、静态整句显示 | ✅ |
-| 字幕文案 | AI看画面生成英文 | ⚠️ 待实测 |
-| 片尾音频 | 保留打字音效 | ✅ |
-| BGM | 替换音轨，无人声 | ✅ |
-
----
-
-## 八、快速检查清单
-
-新对话接手时，检查以下问题：
+新对话接手时，检查：
 
 - [ ] 脚本能否运行？（`python run_workflow.py --help`）
-- [ ] 字幕是否烧入视频？（播放candidate_01.mp4检查）
-- [ ] 片尾是否有打字音效？（播放最后3秒）
-- [ ] 成品是否有人声？（应该是纯BGM）
-- [ ] 设置 `OPENAI_API_KEY` 后AI字幕是否生效？
+- [ ] MiniMax 注册表变量是否存在？（`python -c "import winreg; k=winreg.OpenKey(winreg.HKEY_CURRENT_USER,r'Environment',0,winreg.KEY_READ); print(winreg.QueryValueEx(k,'MINIMAX_API_KEY')[0][:20])"`）
+- [ ] 单元测试通过？（`python test_workflow.py`）
+- [ ] AI字幕是否生效？（看日志是否出现 `MiniMax-M3 Vision`）
 
 ---
 
