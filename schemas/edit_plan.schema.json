@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Kunzyyy/AI-automated-cutting/schemas/edit_plan.schema.json",
+  "title": "Edit Plan Set",
+  "description": "One or two candidate timelines selected from a Footage Index. Revision 0 is the initial plan; revisions 1 and 2 are the only allowed Reviewer recuts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "generated_at",
+    "director",
+    "candidates"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "job_id": {
+      "$ref": "#/$defs/id"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "footage_index_uri": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "director": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "prompt_version": {
+          "type": "string",
+          "maxLength": 100
+        }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "candidate_index",
+        "revision",
+        "status",
+        "narrative",
+        "target_body_duration_seconds",
+        "total_body_duration_seconds",
+        "timeline",
+        "music_direction",
+        "caption_direction",
+        "validation"
+      ],
+      "properties": {
+        "candidate_id": {
+          "$ref": "#/$defs/id"
+        },
+        "candidate_index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "0 is the initial cut; 1-2 are Reviewer-triggered recuts."
+        },
+        "based_on_review_id": {
+          "$ref": "#/$defs/id"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "validated",
+            "rough_cut_rendered",
+            "review_passed",
+            "locked",
+            "rejected"
+          ]
+        },
+        "narrative": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "target_body_duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 120
+        },
+        "total_body_duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 120
+        },
+        "timeline": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/timeline_clip"
+          }
+        },
+        "music_direction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mood",
+            "energy_curve",
+            "vocal_policy",
+            "beat_sync"
+          ],
+          "properties": {
+            "mood": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "energy_curve": {
+              "type": "string",
+              "enum": [
+                "flat",
+                "gentle_rise",
+                "fast_rise",
+                "rise_and_fall",
+                "sectional"
+              ]
+            },
+            "vocal_policy": {
+              "const": "instrumental_only"
+            },
+            "beat_sync": {
+              "type": "boolean"
+            },
+            "search_keywords": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "maxLength": 100
+              }
+            }
+          }
+        },
+        "caption_direction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tone",
+            "language",
+            "max_lines",
+            "evidence_required"
+          ],
+          "properties": {
+            "tone": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "language": {
+              "type": "string",
+              "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$"
+            },
+            "max_lines": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3
+            },
+            "evidence_required": {
+              "const": true
+            },
+            "global_message": {
+              "type": "string",
+              "maxLength": 1000
+            }
+          }
+        },
+        "validation": {
+          "$ref": "#/$defs/validation"
+        }
+      }
+    },
+    "timeline_clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "shot_id",
+        "source_asset_id",
+        "source_in_seconds",
+        "source_out_seconds",
+        "timeline_in_seconds",
+        "duration_seconds",
+        "role",
+        "reason",
+        "caption_intent",
+        "transition"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shot_id": {
+          "$ref": "#/$defs/id"
+        },
+        "source_asset_id": {
+          "$ref": "#/$defs/id"
+        },
+        "source_in_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "source_out_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "timeline_in_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "role": {
+          "$ref": "#/$defs/semantic_tag"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "caption_intent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "caption_evidence": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "speed": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 2
+        },
+        "crop_strategy": {
+          "type": "string",
+          "enum": [
+            "fit",
+            "fill_center",
+            "track_subject",
+            "blur_background"
+          ]
+        },
+        "transition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "duration_seconds"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "cut",
+                "crossfade",
+                "fade",
+                "dip_to_black"
+              ]
+            },
+            "duration_seconds": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        }
+      }
+    },
+    "semantic_tag": {
+      "type": "string",
+      "enum": [
+        "unboxing",
+        "product_macro",
+        "multiple_variants",
+        "photo_selection",
+        "text_customization",
+        "wearing_action",
+        "wearing_result",
+        "touching_memory",
+        "gift_box",
+        "daily_life",
+        "emotional_close",
+        "product_detail",
+        "product_display",
+        "usage_demo",
+        "usage_result",
+        "packaging"
+      ]
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid",
+        "checks",
+        "errors",
+        "warnings"
+      ],
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "checks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "time_ranges",
+            "action_order",
+            "caption_evidence",
+            "duplicate_shots",
+            "required_roles",
+            "duration"
+          ],
+          "properties": {
+            "time_ranges": {
+              "type": "boolean"
+            },
+            "action_order": {
+              "type": "boolean"
+            },
+            "caption_evidence": {
+              "type": "boolean"
+            },
+            "duplicate_shots": {
+              "type": "boolean"
+            },
+            "required_roles": {
+              "type": "boolean"
+            },
+            "duration": {
+              "type": "boolean"
+            }
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/validation_message"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/validation_message"
+          }
+        }
+      }
+    },
+    "validation_message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shot_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    }
+  }
+}

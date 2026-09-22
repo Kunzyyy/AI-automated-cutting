@@ -1,30 +1,45 @@
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.venv/
-venv/
-
-# Secrets and local configuration
+# Secrets and machine-specific configuration
 .env
 .env.*
 !.env.example
+auto-cut.settings.json
+*.pem
+*.key
+*.p12
 
-# Logs and temporary media
+# Python and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Inputs, outputs, analysis caches and local job configurations
+assets/*
+!assets/README.md
+data/
+outputs/
+output/
+work/
+自动剪辑成片/
+analysis-cache/
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+*.mp3
+*.wav
+*.jpg
+*.png
+*.zip
 *.log
-temp*/
-tmp/
-output*/
-candidate_*.mp4
-sub_*.jpg
+*.tmp
 
-# Local integration-test assets
-平销片尾.mp4
-test_minimax.py
-
-# Editor and operating system files
-.idea/
+# Editor and OS
 .vscode/
+.idea/
 .DS_Store
 Thumbs.db

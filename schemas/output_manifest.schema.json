@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Kunzyyy/AI-automated-cutting/schemas/output_manifest.schema.json",
+  "title": "Output Manifest",
+  "description": "Machine-readable job result and artifact index returned to n8n.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "updated_at", "job_status", "stage_status", "candidates", "supporting_artifacts"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "job_id": { "$ref": "#/$defs/id" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "job_status": { "type": "string", "enum": ["queued", "running", "awaiting_human_approval", "completed", "partially_completed", "failed", "cancelled"] },
+    "progress_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+    "stage_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analyze", "plan", "rough_cut", "review", "finalize", "quality_control"],
+      "properties": {
+        "analyze": { "$ref": "#/$defs/stage_state" },
+        "plan": { "$ref": "#/$defs/stage_state" },
+        "rough_cut": { "$ref": "#/$defs/stage_state" },
+        "review": { "$ref": "#/$defs/stage_state" },
+        "finalize": { "$ref": "#/$defs/stage_state" },
+        "quality_control": { "$ref": "#/$defs/stage_state" }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": { "$ref": "#/$defs/candidate_output" }
+    },
+    "supporting_artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_uri", "footage_index_uri", "edit_plan_uri"],
+      "properties": {
+        "job_uri": { "type": "string", "format": "uri-reference" },
+        "footage_index_uri": { "type": "string", "format": "uri-reference" },
+        "edit_plan_uri": { "type": "string", "format": "uri-reference" },
+        "review_report_uri": { "type": "string", "format": "uri-reference" },
+        "log_uri": { "type": "string", "format": "uri-reference" }
+      }
+    },
+    "error": { "$ref": "#/$defs/error" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "stage_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "running", "completed", "failed", "skipped"] },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "message": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "candidate_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "candidate_index", "plan_revision", "status"],
+      "properties": {
+        "candidate_id": { "$ref": "#/$defs/id" },
+        "candidate_index": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "plan_revision": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "status": { "type": "string", "enum": ["pending", "rough_cut_ready", "review_failed", "awaiting_human_approval", "finalizing", "completed", "failed"] },
+        "rough_cut": { "$ref": "#/$defs/video_artifact" },
+        "final_video": { "$ref": "#/$defs/video_artifact" },
+        "captions": { "$ref": "#/$defs/caption_artifact" },
+        "bgm": { "$ref": "#/$defs/bgm_artifact" },
+        "end_card": { "$ref": "#/$defs/end_card_artifact" },
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["review_id", "decision", "overall_score", "report_uri"],
+          "properties": {
+            "review_id": { "$ref": "#/$defs/id" },
+            "decision": { "type": "string", "enum": ["pass", "revise", "reject", "human_review"] },
+            "overall_score": { "type": "number", "minimum": 0, "maximum": 100 },
+            "report_uri": { "type": "string", "format": "uri-reference" }
+          }
+        },
+        "technical_qc": { "$ref": "#/$defs/technical_qc" },
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "completed" } }, "required": ["status"] },
+          "then": { "required": ["rough_cut", "final_video", "captions", "bgm", "end_card", "review", "technical_qc"] }
+        }
+      ]
+    },
+    "video_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "duration_seconds", "width", "height", "fps", "container", "size_bytes"],
+      "properties": {
+        "uri": { "type": "string", "format": "uri-reference" },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "fps": { "type": "number", "exclusiveMinimum": 0 },
+        "container": { "const": "mp4" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
+      }
+    },
+    "caption_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sidecar_uri", "format", "language", "cue_count", "burned_in", "safe_area_check_passed"],
+      "properties": {
+        "sidecar_uri": { "type": "string", "format": "uri-reference" },
+        "format": { "type": "string", "enum": ["ass", "srt", "vtt"] },
+        "language": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$" },
+        "cue_count": { "type": "integer", "minimum": 1 },
+        "burned_in": { "type": "boolean" },
+        "safe_area_check_passed": { "type": "boolean" }
+      }
+    },
+    "bgm_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_uri", "track_name", "instrumental", "source_in_seconds", "duration_seconds", "gain_db", "fade_in_seconds", "fade_out_seconds", "beat_aligned"],
+      "properties": {
+        "source_uri": { "type": "string", "format": "uri-reference" },
+        "track_name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "instrumental": { "const": true },
+        "bpm": { "type": "number", "exclusiveMinimum": 0 },
+        "source_in_seconds": { "type": "number", "minimum": 0 },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "gain_db": { "type": "number", "minimum": -60, "maximum": 12 },
+        "fade_in_seconds": { "type": "number", "minimum": 0 },
+        "fade_out_seconds": { "type": "number", "minimum": 0 },
+        "beat_aligned": { "type": "boolean" }
+      }
+    },
+    "end_card_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_uri", "normalized_uri", "duration_seconds", "own_audio_preserved", "appended"],
+      "properties": {
+        "source_uri": { "type": "string", "format": "uri-reference" },
+        "normalized_uri": { "type": "string", "format": "uri-reference" },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "own_audio_preserved": { "const": true },
+        "appended": { "const": true }
+      }
+    },
+    "technical_qc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "black_frames", "frozen_frames", "audio_peak_dbfs", "audio_clipping", "caption_safe_area", "end_card_present", "errors", "warnings"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "black_frames": { "type": "integer", "minimum": 0 },
+        "frozen_frames": { "type": "integer", "minimum": 0 },
+        "audio_peak_dbfs": { "type": "number", "maximum": 0 },
+        "audio_clipping": { "type": "boolean" },
+        "caption_safe_area": { "type": "boolean" },
+        "end_card_present": { "type": "boolean" },
+        "errors": { "type": "array", "items": { "type": "string", "maxLength": 1000 } },
+        "warnings": { "type": "array", "items": { "type": "string", "maxLength": 1000 } }
+      }
+    },
+    "error": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "retryable": { "type": "boolean" },
+        "stage": { "type": "string", "enum": ["analyze", "plan", "rough_cut", "review", "finalize", "quality_control", "delivery"] }
+      }
+    }
+  }
+}

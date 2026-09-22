@@ -1,0 +1,372 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Kunzyyy/AI-automated-cutting/schemas/review_report.schema.json",
+  "title": "Rough Cut Review Report",
+  "description": "Whole-video semantic and technical review for one or two current candidate revisions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "generated_at",
+    "reviewer",
+    "candidate_reviews"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "job_id": {
+      "$ref": "#/$defs/id"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "prompt_version": {
+          "type": "string",
+          "maxLength": 100
+        }
+      }
+    },
+    "candidate_reviews": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/candidate_review"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "candidate_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_id",
+        "candidate_id",
+        "candidate_index",
+        "plan_revision",
+        "recut_attempts_used",
+        "rough_cut_uri",
+        "decision",
+        "next_action",
+        "can_recut",
+        "overall_score",
+        "scores",
+        "hard_checks",
+        "summary",
+        "issues",
+        "change_requests"
+      ],
+      "properties": {
+        "review_id": {
+          "$ref": "#/$defs/id"
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/id"
+        },
+        "candidate_index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "recut_attempts_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Must equal the current plan revision when the initial plan is revision 0."
+        },
+        "rough_cut_uri": {
+          "type": "string",
+          "format": "uri-reference"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "revise",
+            "reject",
+            "human_review"
+          ]
+        },
+        "next_action": {
+          "type": "string",
+          "enum": [
+            "lock_plan",
+            "revise_plan",
+            "reject_candidate",
+            "request_human_review"
+          ]
+        },
+        "can_recut": {
+          "type": "boolean",
+          "description": "False after plan_revision 2; the orchestrator must not schedule a third recut."
+        },
+        "overall_score": {
+          "$ref": "#/$defs/score"
+        },
+        "scores": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "narrative_logic",
+            "action_continuity",
+            "pacing",
+            "product_clarity",
+            "evidence_alignment",
+            "visual_quality",
+            "commercial_effectiveness"
+          ],
+          "properties": {
+            "narrative_logic": {
+              "$ref": "#/$defs/score"
+            },
+            "action_continuity": {
+              "$ref": "#/$defs/score"
+            },
+            "pacing": {
+              "$ref": "#/$defs/score"
+            },
+            "product_clarity": {
+              "$ref": "#/$defs/score"
+            },
+            "evidence_alignment": {
+              "$ref": "#/$defs/score"
+            },
+            "visual_quality": {
+              "$ref": "#/$defs/score"
+            },
+            "commercial_effectiveness": {
+              "$ref": "#/$defs/score"
+            }
+          }
+        },
+        "hard_checks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product_macro": {
+              "type": "boolean"
+            },
+            "customization_or_core_selling_point": {
+              "type": "boolean"
+            },
+            "wearing_or_usage_result": {
+              "type": "boolean"
+            },
+            "no_black_frames": {
+              "type": "boolean"
+            },
+            "no_duplicate_shots": {
+              "type": "boolean"
+            },
+            "no_broken_actions": {
+              "type": "boolean"
+            },
+            "product_visible": {
+              "type": "boolean"
+            },
+            "supported_selling_point": {
+              "type": "boolean"
+            },
+            "coherent_presentation": {
+              "type": "boolean"
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "product_macro",
+                "customization_or_core_selling_point",
+                "wearing_or_usage_result",
+                "no_black_frames",
+                "no_duplicate_shots",
+                "no_broken_actions"
+              ]
+            },
+            {
+              "required": [
+                "product_visible",
+                "supported_selling_point",
+                "coherent_presentation",
+                "no_black_frames",
+                "no_duplicate_shots",
+                "no_broken_actions"
+              ]
+            }
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/issue"
+          }
+        },
+        "change_requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/change_request"
+          }
+        }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "category",
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "issue_id": {
+          "$ref": "#/$defs/id"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "narrative",
+            "continuity",
+            "pacing",
+            "product_visibility",
+            "evidence",
+            "repetition",
+            "visual_quality",
+            "black_frame",
+            "audio",
+            "other"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "minor",
+            "major",
+            "blocking"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "start_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "end_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shot_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "change_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "operation",
+        "reason",
+        "priority"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "replace_clip",
+            "remove_clip",
+            "insert_clip",
+            "reorder_clip",
+            "trim_clip",
+            "change_transition",
+            "adjust_pacing",
+            "regenerate_plan"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shot_id": {
+          "$ref": "#/$defs/id"
+        },
+        "replacement_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        },
+        "target_duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,198 +1,217 @@
-# AI Automated Cutting
+# AI 自动剪辑（单产品广告）
 
-面向电商短视频的 AI 自动剪辑工作流：理解多段基础素材的内容和动作顺序，自动生成 1–2 条有叙事逻辑、字幕、BGM，并带固定平销片尾的竖屏广告成片。
+把同一个产品的几段原视频丢进一个文件夹，自动分析镜头、识别产品、制定剪辑方案、写英文字幕、审核，输出一条竖屏商品广告。
 
-> 项目正在从 V1 启发式脚本升级到 V2「全素材理解 + AI 导演 + 确定性渲染」架构。当前仓库中的 `run_workflow.py` 是可复用的渲染原型，不代表 V2 已经完成。
+**你只需要准备两样东西：一个 AI API Key，和几段同一产品的原视频。** 背景音乐和品牌片尾是可选的，不配也能出片。
 
-## 当前试点：纪念别针
+镜头理解、选片、文案和审片调用 AI API；裁切、拼接、烧字幕、导出全部在本地用 FFmpeg 完成，素材不出本机（发给模型的是抽帧图片）。
 
-参考素材位于：
+---
 
-```text
-D:\doyobest\自动剪辑研究\别针\
-├── 基础素材\       # 4 段待剪原视频
-├── 成品素材\       # 人工成片参考
-└── temp_frames\    # b1–b4 为基础素材抽帧；f1/f2 为两条人工成片抽帧
+## 快速开始（Windows）
+
+### 1. 装两个前置软件
+
+| 软件 | 说明 |
+|------|------|
+| [Python 3.11 或 3.12](https://www.python.org/downloads/) | 安装时勾选 "Add Python to PATH" |
+| [FFmpeg](https://www.gyan.dev/ffmpeg/builds/) | 下载 release build，解压后把 `bin` 目录加入 PATH |
+
+装完在 PowerShell 里确认这三条命令都有输出：
+
+```powershell
+python --version
+ffmpeg -version
+ffprobe -version
 ```
 
-固定片尾：
+### 2. 下载本项目并安装
 
-```text
-D:\doyobest\视频自动剪辑workflow\平销片尾.mp4
+下载仓库（`Code → Download ZIP` 解压，或 `git clone`），然后**双击 `安装.cmd`**。
+它会自动建虚拟环境、装依赖、生成 `.env` 和 `auto-cut.settings.json`。
+
+### 3. 填入你的 API Key
+
+用记事本打开项目根目录的 `.env`，把 Key 换成你自己的：
+
+```ini
+MINIMAX_API_KEY=你的key
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+MINIMAX_MODEL=MiniMax-M3
 ```
 
-四段素材共同描述同一款纪念别针，包含开箱、选照片、输入定制文字、商品特写、佩戴以及日常陪伴等环节。系统不能把它们当作互不相关的视频随机取片，而应先识别镜头的叙事作用，再跨素材组合。
+模型账号需要支持**图片输入**和**工具调用（function calling）**。也可以改用 OpenAI 兼容接口，见下方「换一个模型服务商」。
 
-## 成品要求
+### 4. 出片
 
-- 输入：同一商品的多段竖屏基础素材；试点为 4 段别针视频。
-- 输出：1–2 条可供投放或人工终审的竖屏成片。
-- 正文：目标约 15 秒，以叙事完整为优先，产品必须尽早出现。
-- 叙事：镜头之间有因果或广告表达逻辑，动作连续，不乱序拼接。
-- 字幕：根据完整成片逻辑统一生成，不按单镜头孤立编文案。
-- BGM：无人声、风格匹配、按节拍或段落做裁切和淡入淡出。
-- 片尾：固定拼接 `平销片尾.mp4`，保留片尾自身音效。
-- 基础验收：至少一次清晰商品特写、一次定制过程或核心卖点、一次佩戴/使用结果；无黑帧、重复镜头、断裂动作、字幕遮挡和音频爆音。
-
-两条参考成片的共同结构可以概括为：
+把一个产品的素材文件夹**拖到 `拖入素材文件夹.cmd` 上**（或双击它再粘贴路径）。
 
 ```text
-商品/情感钩子 → 定制或品质卖点 → 佩戴/使用 → 情绪收束 → 固定 CTA 片尾
+素材/
+└─ 产品1/          ← 拖这一层
+   ├─ a.mp4
+   ├─ b.mp4
+   └─ c.mp4
 ```
 
-参考成片用于学习风格和最低结构，不作为逐帧照抄的唯一答案。自动版本应优先修正其镜头偏长、桌面动作重复、字幕与画面证据不完全对应等问题。
+同一个文件夹里只放**同一个产品**的视频，支持 MP4、MOV、MKV、AVI、WebM、M4V。不要把装着多个产品的总目录丢进去。
 
-## 为什么 V1 达不到预期
+命令行等价写法：
 
-旧脚本已调用多模态 API，但 AI 主要用于逐个 clip 看少量帧并生成字幕；真正决定“选哪段、按什么顺序、各用多长”的 Stage 3 仍是启发式规则。它会按画质分数、固定时长和随机扰动选片，无法理解完整故事，因此会出现：
+```powershell
+.\.venv\Scripts\python.exe .\auto_cut.py ".\素材\产品1"
+```
 
-- 每个镜头单看合理，连起来却没有逻辑；
-- 同一动作被切碎、打乱或重复；
-- 字幕角色固定循环，文案和镜头证据错配；
-- BGM 按字幕关键词随机选择，不能跟随节奏和情绪；
-- 多生成几个候选只是扩大随机性，不等于提高剪辑质量。
+---
 
-V1 仍可复用的部分包括：素材扫描、ffprobe、抽帧、场景检测、基础质量指标、FFmpeg 裁切/缩放/拼接、ASS 字幕烧录、片尾标准化和结果验收。后续会把它们拆成稳定的执行模块，而不是继续在单文件脚本里叠加创意规则。
+## 你会拿到什么
 
-## V2 工作流
+输出默认在素材文件夹**上一级**的 `自动剪辑成片\product-日期时间-编号\`（用 `--output-root` 可改）：
+
+| 文件 | 含义 |
+|------|------|
+| `成品.mp4` | 粗剪、成片视觉审核、技术检查**全部通过** |
+| `待检查预览.mp4` | 没过审，保留可用版本供人工看，**不要当成品直接投放** |
+| `product_profile.json` | AI 判断出的产品是什么、卖点、情绪基调 |
+| `footage_index.json` | 每段素材的分镜、画面内容分析 |
+| `edit_plan.json` | 最终采用的剪辑方案（用了哪段的哪几秒） |
+| `review_report.json` / `output_manifest.json` | 审核问题清单、任务状态、各产物路径 |
+
+默认规格：1080×1920、30fps、正文约 15 秒（±2 秒），英文字幕，原速硬切，使用完整镜头。
+
+---
+
+## BGM 和字幕，到底要不要自己准备？
+
+这是最常被问的两件事，结论：
+
+| | 要不要你准备 | 说明 |
+|---|---|---|
+| **字幕** | **不用** | AI 看完整条片子统一写英文文案，按镜头切分，自动烧进画面。字体 Lato 已随仓库附带（SIL OFL 许可），白字黑描边、自动避让两行安全区 |
+| **背景音乐** | **可选** | 不配置 → 正文是静音的（片子照样出，QC 不会因此判失败，只留一条提醒）。配置了 → AI 按情绪关键词从你的音乐库里选一首，自动淡入淡出 |
+| **品牌片尾** | **可选** | 不配置 → 只输出正文。配置了 → 自动缩放到成片尺寸并拼在正文后面，保留片尾自己的音效 |
+
+**为什么音乐不随仓库附带**：能商用的音乐都有各自的授权条款，打包进开源仓库会把授权风险转嫁给每个用户。所以这里只做接口，曲子你自己放。
+
+### 想加音乐和片尾（推荐，成片质感差别很大）
+
+在项目里建 `assets` 目录：
 
 ```text
-上传任务
-  ↓
-素材探测与标准化
-  ↓
-场景/动作边界检测 + 关键帧/低清代理视频
-  ↓
-多模态模型理解全部素材
-  ↓
-Shot Cards（镜头卡：人物、商品、动作、阶段、画质、连续性）
-  ↓
-AI Director 生成 1–2 份结构化 EditPlan
-  ↓
-规则校验：证据匹配、动作顺序、重复度、时长、素材覆盖
-  ↓
-FFmpeg 生成无字幕毛片
-  ↓
-AI Reviewer 观看完整毛片
-  ├─ 不通过：按问题修改 EditPlan，最多重剪两次
-  └─ 通过：锁定叙事结构
-  ↓
-BGM 选曲/节拍对齐 + 全局字幕文案与版式
-  ↓
-固定片尾 + 技术质检 + 语义复审
-  ↓
-成片、EditPlan、质检报告
+assets/
+├─ end-card.mp4        品牌片尾：竖屏、自带音轨、一般 3~4 秒
+└─ music/              无人声音乐，放 .mp3 或 .wav
+   ├─ warm-piano.mp3
+   ├─ upbeat-guitar.mp3
+   └─ calm-ambient.mp3
 ```
 
-### 1. Shot Card
-
-每个候选镜头必须先转换为结构化镜头卡。试点至少支持以下标签：
-
-```text
-unboxing
-product_macro
-multiple_variants
-photo_selection
-text_customization
-wearing_action
-wearing_result
-touching_memory
-gift_box
-daily_life
-emotional_close
-```
-
-除语义标签外，还需记录：源文件、起止时间、人物/服装/商品身份、动作前后状态、主体位置、清晰度、运动强度、转场可用性和与相邻镜头的连续性。
-
-### 2. EditPlan
-
-AI 不直接操作 FFmpeg，而是输出可校验的 JSON 决策。例如：
+然后编辑根目录的 `auto-cut.settings.json`：
 
 ```json
 {
-  "narrative": "从照片定制到日常陪伴",
-  "target_duration": 18,
-  "clips": [
-    {
-      "source": "source_04.mp4",
-      "start": 0.8,
-      "end": 3.2,
-      "role": "photo_selection",
-      "caption_intent": "customization",
-      "transition": "cut"
-    }
-  ],
-  "music": {
-    "mood": "warm_memory",
-    "energy_curve": "gentle_rise"
-  }
+  "end_card": "assets/end-card.mp4",
+  "bgm_library": "assets/music",
+  "body_seconds": 15,
+  "width": 1080,
+  "height": 1920
 }
 ```
 
-渲染前必须进行确定性校验：时间范围合法、动作未逆序、定制类字幕确有手机/平板画面证据、没有高相似连续镜头，并满足成品硬性要求。失败时只把具体错误反馈给 AI 修订 EditPlan，不盲目重跑全部流程。
+选曲逻辑是**按文件名匹配情绪词**的：AI 为这条片子给出 `warm` / `calm` / `elegant` / `emotional` / `upbeat` 之类关键词，程序挑文件名（或所在子目录名）命中最多的那首。所以文件名里带上情绪词最管用，例如 `warm-piano-loop.mp3`；也可以按目录分类 `music/warm/piano-01.mp3`。
 
-### 3. 字幕与 BGM
+音乐必须**无人声**（人声会和字幕打架），并且确认你有商用授权。免费可商用的常见来源：Pixabay Music、YouTube Audio Library、Free Music Archive（逐首确认许可证）。
 
-字幕应在剪辑结构确定后，结合完整 EditPlan 和毛片统一生成。文案表达的是广告信息，而不是机械描述画面；同时必须有镜头证据支持。字幕位置需根据主体区域动态避让，并使用高对比字体、描边和安全边距。
+片尾**必须自带音轨**，否则会直接报错；分辨率会自动缩放，时长不计入正文的 15 秒。
 
-BGM 应由整体情绪、节奏和目标时长共同决定。Worker 负责分析 BPM/段落/强拍，对入点、切点和结尾做对齐，并在拼接固定片尾时正确处理两段音频。
+更多说明见 `assets/README.md`。
 
-## n8n 交付架构
+---
 
-n8n 用作业务编排层，视频计算由独立 Worker 完成：
+## 换一个模型服务商
 
-```text
-Webhook/Form
-  → 创建 job_id、保存素材
-  → HTTP 调用 Video Worker
-  → 轮询或接收回调
-  → Reviewer 评分与最多两次自动重剪
-  → 人工审核（可选）
-  → 上传成片/发送下载地址
-  → 记录 EditPlan、日志、耗时和失败原因
+程序走 OpenAI 兼容协议，`.env` 里配哪组 Key 就用哪个：
+
+```ini
+# 方式一：MiniMax（默认）
+MINIMAX_API_KEY=...
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+MINIMAX_MODEL=MiniMax-M3
+
+# 方式二：OpenAI
+OPENAI_API_KEY=...
+OPENAI_TEXT_MODEL=gpt-4o
 ```
 
-建议交付物：
+两组都填时默认用 MiniMax，可以用 `--provider openai` 或 `--model` 覆盖（传给 `run_v2.py`）。
+模型可用性与计费以服务商账户为准；本项目不统计 token 费用，用量请查服务商账单。
 
-- 可导入的 `n8n/workflow.json`；
-- 容器化的 Python Video Worker；
-- `POST /jobs`、`GET /jobs/{id}`、回调接口；
-- 对象存储或共享盘适配器，避免大视频在 n8n 节点间反复传输；
-- Prompt、JSON Schema、品类模板和固定资产配置；
-- 一键启动说明、示例任务、验收样片和错误重试策略。
+---
 
-Dify 可用于 Prompt 调试或 AI Director 子流程，但最终交付优先以 n8n 做总编排，因为它更适合文件流转、HTTP Worker、回调、审批和失败重试。Dify/n8n 都不承担 FFmpeg 长任务本身。
+## 常用命令
 
-## 当前仓库
+```powershell
+# 只检查配置和素材、生成任务，不花钱调 AI
+.\.venv\Scripts\python.exe .\auto_cut.py ".\素材\产品1" --prepare-only
 
-```text
-.
-├── run_workflow.py          # V1 原型：分析、规划、字幕、BGM、渲染集中在单文件
-├── test_workflow.py         # V1 单元测试
-├── prompt_templates.md      # 旧 Prompt 记录，V2 将改为结构化 Schema
-├── handoff.md               # 历史交接记录
-└── 竞品调研报告.md
+# 素材分析或“首次方案生成”失败：复用已完成的镜头缓存续跑
+.\.venv\Scripts\python.exe .\auto_cut.py --resume ".\data\auto-requests\任务编号.json"
+
+# 分析已完成但没过审：在新目录重剪，不覆盖旧任务
+.\.venv\Scripts\python.exe .\auto_cut.py --retry ".\data\auto-requests\任务编号.json"
 ```
 
-当前脚本可用于验证 FFmpeg 渲染链路，但不应作为最终工作流的质量基线。仓库下一步会逐步拆分为 `analyzer`、`director`、`validator`、`renderer`、`reviewer` 和 `api` 模块。
+`--retry` 要求原任务保留了完整分析结果和 `sources/` 素材副本，并会校验原视频内容没变。同一个任务不要同时跑两次。
 
-## 下一里程碑
+---
 
-第一版可交付 MVP 只聚焦“别针”样例，不先做全品类泛化：
+## 它怎么工作的
 
-1. 为四段素材生成可检查的 Shot Cards；
-2. 生成两套叙事不同且通过规则校验的 EditPlan；
-3. 渲染无字幕毛片并完成 AI Reviewer 闭环；
-4. 在通过评审的结构上加入全局字幕、BGM 和固定片尾；
-5. 将同一条 Python 流程封装为 Job API；
-6. 导出 n8n 工作流并完成端到端验收。
+```text
+素材文件夹
+   ↓ Analyzer    分镜、抽帧、视觉理解（结果带缓存）
+   ↓ Product     识别这是什么产品、卖点、情绪基调
+   ↓ Director    AI 出剪辑方案：用哪段的哪几秒、怎么排
+   ↓ Validator   时间、动作连续性、方案合法性校验
+   ↓ Renderer    FFmpeg 粗剪 → 字幕 → 音乐 → 片尾
+   ↓ Reviewer    每 0.5 秒抽一帧给 AI 审片；不过就重剪（最多 2 次）
+   ↓ QC          时长、分辨率、黑帧、冻结画面、音频峰值
+成品.mp4 / 待检查预览.mp4
+```
 
-## 安全说明
+粗剪最多重剪两次，字幕最多生成两轮。审核会区分“同一产品换场景展示”和“同一镜头重复播放”；流程保留每一轮结果，优先选通过或严重问题更少的版本，**不会靠降低分数门槛强行过审**。
 
-- API Key 仅通过环境变量或部署平台 Secret 注入，不提交到仓库。
-- 本地绝对路径只用于当前试点，正式 Worker 必须改为参数或配置项。
-- 原始素材、临时帧、BGM 和成片默认不提交 Git；生产环境使用对象存储或挂载卷。
+### 代码结构
 
-## License
+```text
+auto_cut.py                  文件夹入口：配置、续跑、重试
+run_v2.py                    JSON 任务入口（更底层，见 --help）
+services/video-worker/
+├─ analyzer/                 分镜、抽帧、视觉分析和缓存
+├─ director/                 AI 剪辑方案生成
+├─ validator/                时间、角色、动作和方案检查
+└─ v2/                       产品识别、主流程、渲染、审片
+schemas/                     五份 JSON 数据契约
+tests/                       本地回归测试（不调用真实 AI）
+fonts/                       字幕字体 Lato 及其 OFL 许可证
+```
 
-当前仓库尚未添加开源许可证。在许可证明确之前，请勿假设代码可对外再分发。
+跑测试（需要 FFmpeg）：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+---
+
+## 已知限制
+
+- 字幕目前只做**英文**（`brief.language` 必须为 `en`）。
+- 转场只有硬切，原速播放，不做变速、抠像、字幕逐字动画和节拍对齐。
+- AI 按每 0.5 秒一帧抽样审核，**不能保证发现所有瞬间瑕疵**，也不判断音频内容。投放前请完整看一遍成片。
+- 素材太少、模型返回异常、网络或渲染故障，都可能导致连预览都没有。
+- 实际验证过摆件和节日挂件品类，其他品类需要用真实素材验证。
+
+## 隐私与授权
+
+`.gitignore` 已排除密钥、本地配置、输入输出媒体、任务记录和缓存。素材、音乐、品牌片尾和 API Key 都不在仓库内，请使用你有权使用的文件。
